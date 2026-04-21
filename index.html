@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Focus PDF Reader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="group">
+      <button id="openBtn" title="Open PDF">Open PDF</button>
+      <button id="resumeBtn" hidden title="Resume last PDF">Resume</button>
+      <input type="file" id="fileInput" accept="application/pdf" hidden />
+      <span id="fileName" class="muted">No file loaded</span>
+    </div>
+    <div class="group">
+      <button id="prevPage" title="Previous page (←)">◀</button>
+      <span id="pageInfo" class="muted">– / –</span>
+      <button id="nextPage" title="Next page (→)">▶</button>
+      <span class="sep"></span>
+      <button id="zoomOut" title="Zoom out ([)">−</button>
+      <button id="zoomFit" title="Fit width (F)">Fit</button>
+      <button id="zoomIn" title="Zoom in (])">+</button>
+    </div>
+  </header>
+
+  <main id="viewer-wrap">
+    <div id="viewer"></div>
+    <div id="drop-hint">Drop a PDF here, or click <b>Open PDF</b></div>
+  </main>
+
+  <aside id="controls">
+    <button id="playBtn" title="Play / Pause (Space)">▶ Play</button>
+    <div class="ctrl">
+      <label for="wpm">Speed</label>
+      <input type="range" id="wpm" min="80" max="900" value="250" step="10" />
+      <span id="wpmVal">250 wpm</span>
+    </div>
+    <div class="ctrl">
+      <label for="band">Band</label>
+      <input type="range" id="band" min="1" max="15" value="5" step="1" />
+      <span id="bandVal">5 words</span>
+    </div>
+    <div class="ctrl">
+      <label class="check"><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+    </div>
+    <div class="ctrl row-buttons">
+      <button id="bookmarkBtn" title="Pin bookmark at current word (B)">★ Bookmark</button>
+      <button id="gotoBookmarkBtn" title="Jump to pinned bookmark (G)" disabled>→ Go</button>
+    </div>
+    <div id="bookmarkInfo" class="muted small" hidden></div>
+    <div id="shortcutsHint" class="muted small">
+      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart page · B pin · G go · click to jump
+    </div>
+  </aside>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
