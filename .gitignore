@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Generated macOS app bundles (built by ./build_app.sh)
+*.app/
+/Focus PDF Reader.app
+/Stop Focus PDF.app

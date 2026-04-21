@@ -1,27 +1,31 @@
 # Focus PDF Reader
 
-An ADHD-friendly PDF reader with a moving highlight band, variable reading speed,
-persistent bookmarks, and full Chrome-extension compatibility (because it runs as a
-web page in your normal Chrome).
+An ADHD-friendly PDF reader. Variable-speed yellow highlight band that moves
+word-by-word across the page, auto-scroll, resizable band (1–15 words), persistent
+bookmarks keyed by file content hash, click-to-jump, and full Chrome-extension
+compatibility.
 
-## Features
+Runs as an installable Chrome PWA with offline support via a service worker.
 
-- Simple UI. Dark chrome, warm off-white paper.
-- Variable-speed highlight band (1/2/3 lines wide) that moves across the page at your chosen WPM.
-- Auto-scroll follows the highlight.
-- Persistent per-file bookmarks: page, line, WPM, band size, zoom — saved by file hash,
-  so the same file resumes where you left off even after closing the app or rebooting.
-- "Resume" button for the last PDF you opened (via the File System Access API).
-- Zoom in/out/fit-to-width.
-- Keyboard-driven. Works great without the mouse.
-- Drag-and-drop a PDF to open it.
+## Quick start — one click
 
-## Run it
+```bash
+cd ~/Desktop/PDF_reader
+./build_app.sh
+```
 
-This is a pure static web app. Because it uses ES modules and PDF.js, you need to
-serve it over `http://` rather than opening the HTML file directly with `file://`.
+That produces **`Focus PDF Reader.app`** (and a `Stop Focus PDF.app` helper).
+Drag `Focus PDF Reader.app` to `/Applications` or the Dock.
 
-### Option A — Python (already on macOS)
+Double-click it and Chrome opens straight to the reader. No Terminal window, no
+"Install as app" step. Everything is self-contained inside the bundle.
+
+- Behind the scenes the app boots a tiny local server on port `8765` and opens Chrome at it.
+- All your Chrome extensions run on the page as usual.
+- Double-click **`Stop Focus PDF.app`** when you want to free the port (or just
+  let it be — it uses negligible resources until you restart).
+
+## Manual start (alternative)
 
 ```bash
 cd ~/Desktop/PDF_reader
@@ -30,65 +34,56 @@ python3 -m http.server 8000
 
 Then open http://localhost:8000 in Chrome.
 
-### Option B — Node
+## Features
 
-```bash
-cd ~/Desktop/PDF_reader
-npx serve .
-```
+- **Moving highlight band**, 1–15 words wide, pacing based on your WPM slider (80–900 WPM).
+- **Auto-scroll** keeps the highlighted line in view.
+- **Click-to-jump** — click any word on any page to move the band there.
+- **Auto-resume** — every PDF remembers where you left off, keyed by SHA-256 of its contents.
+  Works across tab close, Chrome close, and reboots.
+- **Pinned bookmark** (press `B`) — gold ribbon in the margin. Press `G` to jump there.
+- **File System Access API** — the app remembers your last PDF and offers a one-click
+  "Resume" button.
+- **Graceful shutdown** — closing the tab/window/switching tabs all save state and stop playback.
+- **Zoom in/out/fit-to-width**, keyboard-driven.
 
-Then open the URL it prints (usually http://localhost:3000).
-
-### Tip: make it one click
-
-- On macOS, save `http://localhost:8000` as a Chrome app:
-  Chrome → ⋮ menu → *Cast, save, and share* → *Install page as app*.
-  You get a dock icon that opens this reader in its own window.
-
-## Usage
-
-1. Click **Open PDF** (or drag a PDF onto the window).
-2. Press **Space** to start the moving highlight.
-3. Adjust speed with the slider or `+` / `-` keys.
-4. Change the band width with the **Band** selector or keys `1` / `2` / `3`.
-5. Your position is saved automatically as the highlight moves. Close the tab, reopen later,
-   click **Resume**, and pick up where you left off.
-
-### Keyboard shortcuts
+## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
 | Space | Play / pause highlight |
 | ← / → | Previous / next page |
-| `+` / `-` | Speed up / slow down (±25 WPM) |
+| `+` / `-` | Speed ±25 WPM |
 | `[` / `]` | Zoom out / in |
 | `F` | Fit to width |
-| `1` / `2` / `3` | Band width (lines) |
-| `B` | Save bookmark (also auto-saves) |
+| `,` / `.` | Band size smaller / larger |
+| `B` | Pin bookmark at current word |
+| `G` | Go to pinned bookmark |
 | `R` | Restart highlight at top of current page |
 | `Esc` | Stop highlight |
+| Click | Jump highlight to the nearest word |
 
-## Chrome extensions
+## Limitations
 
-Your existing extensions (highlighters, dictionary lookups, translators, etc.) run on this
-page like any other webpage. If an extension is restricted to specific sites, allow it on
-`http://localhost:8000`.
-
-## Limitations (v1)
-
-- **Text PDFs only.** Scanned PDFs have no text layer, so the highlight has nothing to
-  track. OCR via Tesseract.js is a future addition.
-- **Rotated text / multi-column layouts** may produce uneven line grouping.
-- The highlight-to-next-line timing is based on word count divided by WPM.
+- Text PDFs only (v1). Scanned PDFs have no text layer — OCR would be a future addition.
+- Rotated or heavily multi-column layouts may produce uneven line grouping.
 
 ## File layout
 
-- `index.html` — shell
+- `index.html` — shell + PWA manifest link + SW registration
 - `styles.css` — styling
 - `app.js` — all logic
-- No build step, no dependencies installed locally. PDF.js is loaded from jsDelivr.
+- `manifest.webmanifest` — PWA manifest
+- `sw.js` — service worker (offline caching)
+- `icon.svg` — app icon
+- `build_app.sh` — builds the macOS `.app` bundle
+- `launch.command` — fallback double-click launcher (no `.app` build required)
+
+No build step, no dependencies installed locally. PDF.js is loaded from jsDelivr and
+then cached by the service worker for offline use.
 
 ## Privacy
 
-Everything is local. Bookmarks are in `localStorage`; the file handle for "Resume" is
-stored in IndexedDB. No network calls except fetching PDF.js from jsDelivr on first load.
+Everything is local. Bookmarks live in `localStorage`. The "Resume last PDF" handle
+is in IndexedDB. The only outbound request is the first-time fetch of PDF.js from
+jsDelivr, after which the service worker serves it from cache.

@@ -148,6 +148,114 @@ body.has-doc #drop-hint { display: none; }
 }
 .bookmark-marker:hover { transform: translateY(-1px) scale(1.05); }
 
+/* ---------- Settings modal ---------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(10, 11, 14, 0.7);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+/* The [hidden] attribute must actually hide the element. The author-level
+   .overlay rule above would otherwise override the user-agent [hidden] style. */
+.overlay[hidden] { display: none !important; }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  width: min(760px, 100%);
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.modal > header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--panel-border);
+}
+.modal > header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.modal > header #settingsClose {
+  background: transparent; font-size: 18px; color: var(--muted);
+  padding: 4px 10px;
+}
+.modal > header #settingsClose:hover { color: var(--text); background: var(--btn); }
+
+.tabs { display: flex; gap: 4px; padding: 8px 14px 0; border-bottom: 1px solid var(--panel-border); }
+.tab {
+  background: transparent; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 8px 14px;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab:hover { color: var(--text); background: transparent; }
+
+.tab-pane { padding: 18px; overflow-y: auto; display: none; }
+.tab-pane.active { display: block; }
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  align-items: center; gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #343741;
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row > label:first-child { color: var(--muted); font-size: 13px; }
+.settings-row input[type="range"] { accent-color: var(--accent); }
+.settings-row .check { display: flex; align-items: center; gap: 6px; }
+
+.storage-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: var(--text);
+  background: #1a1b20; padding: 6px 8px; border-radius: 5px;
+  word-break: break-all; grid-column: 2 / span 2;
+  max-width: 100%;
+}
+
+.bookmarks-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 10px;
+}
+.bookmarks-list { display: flex; flex-direction: column; gap: 6px; }
+
+.bookmark-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: #23252c; border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+.bookmark-row.missing { border-color: #a33; background: #2a1e1f; }
+.bookmark-status {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #4caf50;
+}
+.bookmark-row.missing .bookmark-status {
+  background: #e53935;
+  box-shadow: 0 0 0 3px rgba(229, 57, 53, 0.18);
+}
+.bookmark-main { min-width: 0; }
+.bookmark-name {
+  font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bookmark-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.bookmark-meta code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #b9bcc4;
+}
+.bookmark-actions { display: flex; gap: 6px; }
+.bookmark-actions button {
+  padding: 4px 10px; font-size: 12px;
+}
+.bookmark-actions .danger { background: #5a2a2a; }
+.bookmark-actions .danger:hover { background: #7a3535; }
+.bookmark-actions .relink { background: #5a4a20; }
+.bookmark-actions .relink:hover { background: #7a6730; }
+
+.bookmarks-empty {
+  color: var(--muted); text-align: center; padding: 30px; font-size: 13px;
+}
+
 .highlight-band {
   position: absolute;
   pointer-events: none;

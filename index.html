@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1c1d22" />
   <title>Focus PDF Reader</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,6 +16,7 @@
       <button id="openBtn" title="Open PDF">Open PDF</button>
       <button id="resumeBtn" hidden title="Resume last PDF">Resume</button>
       <input type="file" id="fileInput" accept="application/pdf" hidden />
+      <input type="file" id="relinkInput" accept="application/pdf" hidden />
       <span id="fileName" class="muted">No file loaded</span>
     </div>
     <div class="group">
@@ -22,8 +27,54 @@
       <button id="zoomOut" title="Zoom out ([)">−</button>
       <button id="zoomFit" title="Fit width (F)">Fit</button>
       <button id="zoomIn" title="Zoom in (])">+</button>
+      <span class="sep"></span>
+      <button id="settingsBtn" title="Settings">⚙</button>
     </div>
   </header>
+
+  <div id="settingsOverlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header>
+        <h2 id="settingsTitle">Settings</h2>
+        <button id="settingsClose" title="Close (Esc)">✕</button>
+      </header>
+      <nav class="tabs">
+        <button class="tab active" data-tab="general">General</button>
+        <button class="tab" data-tab="bookmarks">Bookmarks</button>
+      </nav>
+      <section class="tab-pane active" data-tab="general">
+        <div class="settings-row">
+          <label>Storage file</label>
+          <code id="storagePath" class="storage-path">loading…</code>
+        </div>
+        <div class="settings-row">
+          <label for="defaultWpm">Default speed</label>
+          <input type="range" id="defaultWpm" min="80" max="900" step="10" />
+          <span id="defaultWpmVal"></span>
+        </div>
+        <div class="settings-row">
+          <label for="defaultBand">Default band</label>
+          <input type="range" id="defaultBand" min="1" max="15" step="1" />
+          <span id="defaultBandVal"></span>
+        </div>
+        <div class="settings-row">
+          <label>Auto-scroll by default</label>
+          <label class="check"><input type="checkbox" id="defaultAutoscroll" /> Enabled</label>
+        </div>
+        <div class="settings-row">
+          <label>Bookmark storage</label>
+          <div id="storageStatus" class="muted small">checking…</div>
+        </div>
+      </section>
+      <section class="tab-pane" data-tab="bookmarks">
+        <div class="bookmarks-toolbar">
+          <span class="muted small" id="bookmarksCount">0 bookmarks</span>
+          <button id="bookmarksExport" title="Download bookmarks.json">Export</button>
+        </div>
+        <div id="bookmarksList" class="bookmarks-list"></div>
+      </section>
+    </div>
+  </div>
 
   <main id="viewer-wrap">
     <div id="viewer"></div>
@@ -56,5 +107,14 @@
   </aside>
 
   <script type="module" src="./app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch((e) =>
+          console.warn("SW registration failed:", e)
+        );
+      });
+    }
+  </script>
 </body>
 </html>

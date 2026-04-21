@@ -51,52 +51,172 @@ const zoomInBtn = $("zoomIn");
 const zoomOutBtn = $("zoomOut");
 const zoomFitBtn = $("zoomFit");
 
-// ---------- Bookmarks (localStorage, keyed by file hash) ----------
-const BM_KEY = "focuspdf:bookmarks:v1";
+// ---------- Central store (server-backed JSON file + localStorage fallback) ----------
+// The Python backend (server.py) exposes /api/store which reads/writes
+// ~/Library/Application Support/FocusPDFReader/bookmarks.json
+// If the backend isn't reachable (e.g. user opened the plain static server),
+// we fall back to localStorage so the app still works.
 
-function loadBookmarks() {
-  try { return JSON.parse(localStorage.getItem(BM_KEY) || "{}"); }
-  catch { return {}; }
+const LS_FALLBACK_KEY = "focuspdf:store:v2";
+const LS_LEGACY_BOOKMARKS_KEY = "focuspdf:bookmarks:v1";
+
+const DEFAULT_SETTINGS = {
+  defaultWpm: 250,
+  defaultBandSize: 5,
+  defaultAutoScroll: true,
+  defaultZoom: 1.25,
+};
+
+const store = {
+  version: 1,
+  settings: { ...DEFAULT_SETTINGS },
+  bookmarks: {},
+  _backend: "localStorage", // or "server"
+  _storagePath: null,
+};
+
+async function apiAvailable() {
+  try {
+    const res = await fetch("/api/store/meta", { cache: "no-store" });
+    return res.ok;
+  } catch { return false; }
 }
-function saveBookmarks(all) {
-  localStorage.setItem(BM_KEY, JSON.stringify(all));
+
+async function loadStore() {
+  const hasApi = await apiAvailable();
+  if (hasApi) {
+    try {
+      const res = await fetch("/api/store", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        Object.assign(store, { version: data.version || 1, settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) }, bookmarks: data.bookmarks || {} });
+        store._backend = "server";
+        try {
+          const meta = await (await fetch("/api/store/meta")).json();
+          store._storagePath = meta.path;
+        } catch {}
+        // One-time migration from localStorage legacy bookmarks if server store is empty
+        if (Object.keys(store.bookmarks).length === 0) {
+          migrateLegacyLocalStorageIntoStore();
+          if (Object.keys(store.bookmarks).length > 0) await saveStoreNow();
+        }
+        return;
+      }
+    } catch (e) { console.warn("store API failed; using localStorage:", e); }
+  }
+  // Fallback: localStorage
+  try {
+    const raw = localStorage.getItem(LS_FALLBACK_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      Object.assign(store, { version: data.version || 1, settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) }, bookmarks: data.bookmarks || {} });
+    } else {
+      migrateLegacyLocalStorageIntoStore();
+    }
+  } catch (e) { console.warn("localStorage store failed:", e); }
+  store._backend = "localStorage";
+  store._storagePath = "browser localStorage (fallback)";
 }
-function getBookmark(hash) { return loadBookmarks()[hash]; }
+
+function migrateLegacyLocalStorageIntoStore() {
+  try {
+    const legacy = JSON.parse(localStorage.getItem(LS_LEGACY_BOOKMARKS_KEY) || "{}");
+    for (const [hash, bm] of Object.entries(legacy)) {
+      if (!store.bookmarks[hash]) store.bookmarks[hash] = bm;
+    }
+  } catch {}
+}
+
+let saveTimer = null;
+function scheduleStoreSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { saveStoreNow().catch(() => {}); saveTimer = null; }, 350);
+}
+
+async function saveStoreNow() {
+  const payload = {
+    version: store.version,
+    settings: store.settings,
+    bookmarks: store.bookmarks,
+  };
+  // Always mirror to localStorage as offline safety net
+  try { localStorage.setItem(LS_FALLBACK_KEY, JSON.stringify(payload)); } catch {}
+  if (store._backend === "server") {
+    try {
+      await fetch("/api/store", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) { console.warn("store save failed (kept local copy):", e); }
+  }
+}
+
+function getBookmark(hash) { return store.bookmarks[hash]; }
 function setBookmark(hash, data) {
-  const all = loadBookmarks();
-  all[hash] = { ...(all[hash] || {}), ...data, updatedAt: Date.now() };
-  saveBookmarks(all);
+  store.bookmarks[hash] = { ...(store.bookmarks[hash] || {}), ...data, updatedAt: Date.now() };
+  scheduleStoreSave();
+}
+function deleteBookmark(hash) {
+  delete store.bookmarks[hash];
+  scheduleStoreSave();
 }
 
-// ---------- File System Access API: remember last file handle ----------
+// ---------- IndexedDB: per-bookmark FileSystemHandles ----------
 const DB_NAME = "focuspdf";
 const DB_STORE = "handles";
+const DB_VERSION = 2;
 
 function idb() {
   return new Promise((res, rej) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+    };
     req.onsuccess = () => res(req.result);
     req.onerror = () => rej(req.error);
   });
 }
-async function saveLastHandle(handle, name) {
+async function idbPut(key, value) {
   const db = await idb();
   await new Promise((res, rej) => {
     const tx = db.transaction(DB_STORE, "readwrite");
-    tx.objectStore(DB_STORE).put({ handle, name }, "last");
+    tx.objectStore(DB_STORE).put(value, key);
     tx.oncomplete = res;
     tx.onerror = () => rej(tx.error);
   });
 }
-async function getLastHandle() {
+async function idbGet(key) {
   const db = await idb();
   return new Promise((res, rej) => {
     const tx = db.transaction(DB_STORE, "readonly");
-    const g = tx.objectStore(DB_STORE).get("last");
-    g.onsuccess = () => res(g.result || null);
+    const g = tx.objectStore(DB_STORE).get(key);
+    g.onsuccess = () => res(g.result ?? null);
     g.onerror = () => rej(g.error);
   });
+}
+async function idbDel(key) {
+  const db = await idb();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    tx.objectStore(DB_STORE).delete(key);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function saveHandleForHash(hash, handle, name) {
+  await idbPut(`bm:${hash}`, { handle, name, savedAt: Date.now() });
+}
+async function getHandleForHash(hash) {
+  return idbGet(`bm:${hash}`);
+}
+async function saveLastHandle(handle, name) {
+  await idbPut("last", { handle, name });
+}
+async function getLastHandle() {
+  return idbGet("last");
 }
 
 // ---------- Hash helper ----------
@@ -106,12 +226,20 @@ async function hashBuffer(buf) {
 }
 
 // ---------- File loading ----------
-async function loadFromFile(file) {
+async function loadFromFile(file, opts = {}) {
   const buf = await file.arrayBuffer();
   state.fileHash = await hashBuffer(buf);
   state.fileName = file.name;
   fileNameEl.textContent = file.name;
   document.title = `${file.name} · Focus PDF Reader`;
+  // Remember basic identity info for the bookmarks list
+  const bm = store.bookmarks[state.fileHash] || {};
+  setBookmark(state.fileHash, {
+    fileName: file.name,
+    fileSize: file.size,
+    lastOpenedAt: Date.now(),
+    missing: false,
+  });
   await loadPdfFromBuffer(buf);
 }
 
@@ -129,19 +257,19 @@ async function loadPdfFromBuffer(buf) {
   document.body.classList.add("has-doc");
 
   const bm = getBookmark(state.fileHash);
+  // Start from store defaults, then override with this file's saved preferences if any.
+  state.zoom = store.settings.defaultZoom ?? 1.25;
+  state.wpm = store.settings.defaultWpm ?? 250;
+  state.bandSize = store.settings.defaultBandSize ?? 5;
   if (bm) {
     if (typeof bm.zoom === "number") state.zoom = bm.zoom;
-    if (typeof bm.wpm === "number") {
-      state.wpm = bm.wpm;
-      wpmSlider.value = bm.wpm;
-      updateWpmDisplay();
-    }
-    if (typeof bm.bandSize === "number") {
-      state.bandSize = bm.bandSize;
-      bandSlider.value = bm.bandSize;
-      updateBandDisplay();
-    }
+    if (typeof bm.wpm === "number") state.wpm = bm.wpm;
+    if (typeof bm.bandSize === "number") state.bandSize = bm.bandSize;
   }
+  wpmSlider.value = state.wpm;
+  bandSlider.value = state.bandSize;
+  updateWpmDisplay();
+  updateBandDisplay();
 
   const pagePromises = [];
   for (let i = 1; i <= state.numPages; i++) pagePromises.push(state.pdfDoc.getPage(i));
@@ -592,20 +720,15 @@ function updateBandDisplay() {
 
 // ---------- File open flow ----------
 async function pickAndOpen() {
-  if (window.showOpenFilePicker) {
-    try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
-        multiple: false,
-      });
-      await saveLastHandle(handle, handle.name);
-      const file = await handle.getFile();
-      await loadFromFile(file);
-      resumeBtn.hidden = true;
-    } catch (_) { /* user cancelled */ }
-  } else {
-    fileInput.click();
+  const picked = await pickPdfFile();
+  if (!picked) return;
+  const { file, handle } = picked;
+  if (handle) await saveLastHandle(handle, handle.name);
+  await loadFromFile(file);
+  if (handle) {
+    await saveHandleForHash(state.fileHash, handle, handle.name);
   }
+  resumeBtn.hidden = true;
 }
 
 async function tryResumeLast() {
@@ -840,15 +963,284 @@ document.addEventListener("keydown", (e) => {
       break;
     }
     case "Escape":
+      if (!settingsOverlay.hidden) { closeSettings(); break; }
       stopPlaying();
       break;
   }
 });
 
+// ---------- Settings modal ----------
+const settingsBtn = $("settingsBtn");
+const settingsOverlay = $("settingsOverlay");
+const settingsClose = $("settingsClose");
+const storagePathEl = $("storagePath");
+const storageStatusEl = $("storageStatus");
+const defaultWpmEl = $("defaultWpm");
+const defaultWpmValEl = $("defaultWpmVal");
+const defaultBandEl = $("defaultBand");
+const defaultBandValEl = $("defaultBandVal");
+const defaultAutoscrollEl = $("defaultAutoscroll");
+const bookmarksListEl = $("bookmarksList");
+const bookmarksCountEl = $("bookmarksCount");
+const bookmarksExportBtn = $("bookmarksExport");
+
+function openSettings() {
+  settingsOverlay.hidden = false;
+  refreshSettingsUI();
+  renderBookmarksList();
+}
+function closeSettings() { settingsOverlay.hidden = true; }
+
+settingsBtn.addEventListener("click", openSettings);
+settingsClose.addEventListener("click", closeSettings);
+settingsOverlay.addEventListener("click", (e) => {
+  if (e.target === settingsOverlay) closeSettings();
+});
+
+// Tab switching
+document.querySelectorAll(".modal .tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const target = btn.dataset.tab;
+    document.querySelectorAll(".modal .tab").forEach((b) => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".modal .tab-pane").forEach((p) =>
+      p.classList.toggle("active", p.dataset.tab === target)
+    );
+    if (target === "bookmarks") renderBookmarksList();
+  });
+});
+
+function refreshSettingsUI() {
+  storagePathEl.textContent = store._storagePath || "(unknown)";
+  storageStatusEl.textContent = store._backend === "server"
+    ? "Saved to a JSON file on disk. Survives app reinstalls and Chrome resets."
+    : "Fallback mode: saved in browser localStorage only. Start the app via Focus PDF Reader.app for file-based storage.";
+  defaultWpmEl.value = store.settings.defaultWpm;
+  defaultWpmValEl.textContent = `${store.settings.defaultWpm} wpm`;
+  defaultBandEl.value = store.settings.defaultBandSize;
+  defaultBandValEl.textContent = `${store.settings.defaultBandSize} words`;
+  defaultAutoscrollEl.checked = !!store.settings.defaultAutoScroll;
+}
+
+defaultWpmEl.addEventListener("input", () => {
+  store.settings.defaultWpm = Number(defaultWpmEl.value);
+  defaultWpmValEl.textContent = `${store.settings.defaultWpm} wpm`;
+  scheduleStoreSave();
+});
+defaultBandEl.addEventListener("input", () => {
+  store.settings.defaultBandSize = Number(defaultBandEl.value);
+  defaultBandValEl.textContent = `${store.settings.defaultBandSize} words`;
+  scheduleStoreSave();
+});
+defaultAutoscrollEl.addEventListener("change", () => {
+  store.settings.defaultAutoScroll = defaultAutoscrollEl.checked;
+  scheduleStoreSave();
+});
+
+bookmarksExportBtn.addEventListener("click", () => {
+  const blob = new Blob(
+    [JSON.stringify({ version: store.version, settings: store.settings, bookmarks: store.bookmarks }, null, 2)],
+    { type: "application/json" }
+  );
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "focuspdf-bookmarks.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+async function renderBookmarksList() {
+  const entries = Object.entries(store.bookmarks)
+    .sort((a, b) => (b[1].lastOpenedAt || b[1].updatedAt || 0) - (a[1].lastOpenedAt || a[1].updatedAt || 0));
+  bookmarksCountEl.textContent = `${entries.length} bookmark${entries.length === 1 ? "" : "s"}`;
+
+  if (!entries.length) {
+    bookmarksListEl.innerHTML = `<div class="bookmarks-empty">No bookmarks yet. Open a PDF to get started.</div>`;
+    return;
+  }
+
+  bookmarksListEl.innerHTML = "";
+  for (const [hash, bm] of entries) {
+    const row = document.createElement("div");
+    row.className = "bookmark-row";
+
+    // Check if we have a handle we can still reach for this PDF
+    let handleEntry = null;
+    try { handleEntry = await getHandleForHash(hash); } catch {}
+    let accessible = false;
+    if (handleEntry && handleEntry.handle) {
+      try {
+        const perm = await handleEntry.handle.queryPermission({ mode: "read" });
+        accessible = perm === "granted" || perm === "prompt";
+      } catch { accessible = false; }
+    }
+    const missing = !handleEntry || !accessible;
+    if (missing) row.classList.add("missing");
+
+    const dot = document.createElement("div");
+    dot.className = "bookmark-status";
+    dot.title = missing ? "File location unknown or not granted — click Relink" : "File accessible";
+    row.appendChild(dot);
+
+    const main = document.createElement("div");
+    main.className = "bookmark-main";
+    const name = document.createElement("div");
+    name.className = "bookmark-name";
+    name.textContent = bm.fileName || "(unknown)";
+    main.appendChild(name);
+    const meta = document.createElement("div");
+    meta.className = "bookmark-meta";
+    const pageLine = typeof bm.page === "number" ? `page ${bm.page}` : "not yet read";
+    const lastOpened = bm.lastOpenedAt ? new Date(bm.lastOpenedAt).toLocaleDateString() : "";
+    const sizeKb = bm.fileSize ? `${Math.round(bm.fileSize / 1024)} KB` : "";
+    meta.innerHTML = `${pageLine} · ${lastOpened || ""} ${sizeKb ? "· " + sizeKb : ""}<br><code>hash ${hash.slice(0, 10)}…</code>`;
+    main.appendChild(meta);
+    row.appendChild(main);
+
+    const actions = document.createElement("div");
+    actions.className = "bookmark-actions";
+
+    if (!missing) {
+      const openBtn = document.createElement("button");
+      openBtn.textContent = "Open ↗";
+      openBtn.title = "Open this PDF";
+      openBtn.addEventListener("click", () => openBookmark(hash));
+      actions.appendChild(openBtn);
+    }
+
+    const relinkBtn = document.createElement("button");
+    relinkBtn.className = "relink";
+    relinkBtn.textContent = missing ? "Relink →" : "Change file";
+    relinkBtn.title = "Pick the file's new location in Finder";
+    relinkBtn.addEventListener("click", () => relinkBookmark(hash));
+    actions.appendChild(relinkBtn);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "danger";
+    delBtn.textContent = "Delete";
+    delBtn.title = "Remove this bookmark";
+    delBtn.addEventListener("click", async () => {
+      if (!confirm(`Delete bookmark for "${bm.fileName}"? This only removes the saved position, not the PDF file.`)) return;
+      deleteBookmark(hash);
+      try { await idbDel(`bm:${hash}`); } catch {}
+      await saveStoreNow();
+      renderBookmarksList();
+    });
+    actions.appendChild(delBtn);
+
+    row.appendChild(actions);
+    bookmarksListEl.appendChild(row);
+  }
+}
+
+async function openBookmark(hash) {
+  try {
+    const entry = await getHandleForHash(hash);
+    if (!entry || !entry.handle) {
+      alert("This bookmark has no saved file location. Click Relink to point it at the PDF.");
+      return;
+    }
+    let perm = await entry.handle.queryPermission({ mode: "read" });
+    if (perm !== "granted") perm = await entry.handle.requestPermission({ mode: "read" });
+    if (perm !== "granted") return;
+    const file = await entry.handle.getFile();
+    await loadFromFile(file);
+    await saveLastHandle(entry.handle, entry.handle.name);
+    closeSettings();
+  } catch (e) {
+    console.warn("Open bookmark failed:", e);
+    // mark as missing in store
+    setBookmark(hash, { missing: true });
+    await saveStoreNow();
+    renderBookmarksList();
+  }
+}
+
+// Pick a PDF. Uses the File System Access API when available (gives us a
+// persistent handle); falls back to a plain <input type="file"> otherwise.
+// Returns { file, handle|null } or null on cancel.
+function pickPdfFile() {
+  if (window.showOpenFilePicker) {
+    return (async () => {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
+          multiple: false,
+        });
+        const file = await handle.getFile();
+        return { file, handle };
+      } catch {
+        return null;
+      }
+    })();
+  }
+  // Fallback for non-Chromium browsers or restricted contexts
+  return new Promise((resolve) => {
+    const input = document.getElementById("relinkInput");
+    const onChange = () => {
+      input.removeEventListener("change", onChange);
+      const file = input.files && input.files[0];
+      input.value = "";
+      resolve(file ? { file, handle: null } : null);
+    };
+    input.addEventListener("change", onChange);
+    input.click();
+  });
+}
+
+async function relinkBookmark(hash) {
+  const picked = await pickPdfFile();
+  if (!picked) return;
+  const { file, handle } = picked;
+
+  const buf = await file.arrayBuffer();
+  const newHash = await hashBuffer(buf);
+  const originalBm = store.bookmarks[hash] || {};
+
+  if (newHash === hash) {
+    if (handle) await saveHandleForHash(hash, handle, handle.name);
+    setBookmark(hash, { fileName: file.name, fileSize: file.size, missing: false });
+    await saveStoreNow();
+    renderBookmarksList();
+    alert(handle
+      ? "Relinked successfully. This file will open automatically from the Bookmarks tab from now on."
+      : "Relinked for this session. Your browser doesn't expose a persistent file handle, so you'll need to re-pick the file each time.");
+    return;
+  }
+
+  // Hashes differ — contents are not identical to the original file
+  const proceed = confirm(
+    `The file you picked has different contents than the original bookmark.\n\n` +
+    `Original: ${originalBm.fileName || "(unknown)"}\n` +
+    `Picked:   ${file.name}\n\n` +
+    `OK = keep the old bookmark's saved position and use this file anyway (likely wrong page).\n` +
+    `Cancel = create a fresh bookmark for the new file and keep the old one too.`
+  );
+  if (proceed) {
+    if (handle) await saveHandleForHash(hash, handle, handle.name);
+    setBookmark(hash, { fileName: file.name, fileSize: file.size, missing: false });
+  } else {
+    if (handle) await saveHandleForHash(newHash, handle, handle.name);
+    setBookmark(newHash, { fileName: file.name, fileSize: file.size, lastOpenedAt: Date.now() });
+  }
+  await saveStoreNow();
+  renderBookmarksList();
+}
+
 // ---------- Startup ----------
 (async function init() {
+  await loadStore();
+  // Apply stored defaults to the live controls
+  state.wpm = store.settings.defaultWpm;
+  state.bandSize = store.settings.defaultBandSize;
+  state.zoom = store.settings.defaultZoom;
+  state.autoScroll = !!store.settings.defaultAutoScroll;
+  wpmSlider.value = state.wpm;
+  bandSlider.value = state.bandSize;
+  autoscrollChk.checked = state.autoScroll;
   updateWpmDisplay();
   updateBandDisplay();
+  refreshSettingsUI();
+
   try {
     const last = await getLastHandle();
     if (last && last.handle) {
