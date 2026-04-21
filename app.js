@@ -1014,6 +1014,16 @@ function refreshSettingsUI() {
   storageStatusEl.textContent = store._backend === "server"
     ? "Saved to a JSON file on disk. Survives app reinstalls and Chrome resets."
     : "Fallback mode: saved in browser localStorage only. Start the app via Focus PDF Reader.app for file-based storage.";
+  const fsaStatusEl = $("fsaStatus");
+  if (fsaStatusEl) {
+    const hasFSA = typeof window.showOpenFilePicker === "function";
+    const uaHint = navigator.userAgentData?.brands?.map(b => b.brand).join(", ")
+                   || navigator.userAgent.split(") ").pop();
+    fsaStatusEl.textContent = hasFSA
+      ? `Native (File System Access API) — persistent file handles supported. Browser: ${uaHint}`
+      : `Fallback (file input) — persistent handles not available in this browser. Open the app from Chrome or Edge. Browser: ${uaHint}`;
+    fsaStatusEl.style.color = hasFSA ? "#8ad18a" : "#e0a05a";
+  }
   defaultWpmEl.value = store.settings.defaultWpm;
   defaultWpmValEl.textContent = `${store.settings.defaultWpm} wpm`;
   defaultBandEl.value = store.settings.defaultBandSize;
@@ -1159,7 +1169,8 @@ async function openBookmark(hash) {
 // persistent handle); falls back to a plain <input type="file"> otherwise.
 // Returns { file, handle|null } or null on cancel.
 function pickPdfFile() {
-  if (window.showOpenFilePicker) {
+  if (typeof window.showOpenFilePicker === "function") {
+    console.log("[focuspdf] pickPdfFile: using File System Access API");
     return (async () => {
       try {
         const [handle] = await window.showOpenFilePicker({
@@ -1168,12 +1179,18 @@ function pickPdfFile() {
         });
         const file = await handle.getFile();
         return { file, handle };
-      } catch {
-        return null;
+      } catch (e) {
+        if (e && e.name === "AbortError") return null;
+        console.warn("[focuspdf] showOpenFilePicker failed, falling back to <input>:", e);
+        return pickViaInputFallback();
       }
     })();
   }
-  // Fallback for non-Chromium browsers or restricted contexts
+  console.log("[focuspdf] pickPdfFile: using <input type=file> fallback (no FSA in this browser)");
+  return pickViaInputFallback();
+}
+
+function pickViaInputFallback() {
   return new Promise((resolve) => {
     const input = document.getElementById("relinkInput");
     const onChange = () => {
