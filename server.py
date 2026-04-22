@@ -30,6 +30,36 @@ else:
 
 APP_DIR.mkdir(parents=True, exist_ok=True)
 STORE_FILE = APP_DIR / "bookmarks.json"
+NOTES_DIR = APP_DIR / "notes"
+NOTES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_hash(h: str) -> str:
+    """Keep only filename-safe characters so clients can't traverse the filesystem."""
+    return "".join(c for c in h if c.isalnum() or c in ("-", "_"))[:128]
+
+
+def note_path(h: str) -> pathlib.Path:
+    return NOTES_DIR / f"{_safe_hash(h)}.txt"
+
+
+def load_note(h: str) -> str:
+    p = note_path(h)
+    if not p.exists():
+        return ""
+    try:
+        return p.read_text("utf-8")
+    except Exception as e:
+        print(f"[focuspdf] could not read note {p}: {e}", file=sys.stderr)
+        return ""
+
+
+def save_note(h: str, text: str) -> pathlib.Path:
+    p = note_path(h)
+    tmp = p.with_suffix(".txt.tmp")
+    tmp.write_text(text, "utf-8")
+    tmp.replace(p)
+    return p
 
 _lock = threading.Lock()
 
@@ -80,12 +110,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEBROOT), **kwargs)
 
+    def end_headers(self):
+        # No HTTP caching for our own app files. Without this, Chrome's
+        # heuristic cache can keep serving stale app.js / index.html / sw.js
+        # long after we've shipped updates. The service worker still provides
+        # offline support, so we don't lose anything.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     # ---------- helpers ----------
     def _json_response(self, status, data):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -100,7 +139,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "path": str(STORE_FILE),
                 "exists": STORE_FILE.exists(),
                 "size": STORE_FILE.stat().st_size if STORE_FILE.exists() else 0,
+                "notesDir": str(NOTES_DIR),
             })
+        if path.startswith("/api/notes/"):
+            h = path[len("/api/notes/"):]
+            text = load_note(h)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            body = text.encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         return super().do_GET()
 
     def do_PUT(self):
@@ -119,17 +169,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             payload.setdefault("bookmarks", {})
             save_store(payload)
             return self._json_response(200, {"ok": True, "path": str(STORE_FILE)})
+        if path.startswith("/api/notes/"):
+            h = path[len("/api/notes/"):]
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._json_response(400, {"error": "invalid utf-8"})
+            p = save_note(h, text)
+            return self._json_response(200, {"ok": True, "path": str(p), "bytes": len(raw)})
         self.send_error(404, "Unknown API endpoint")
 
     def do_DELETE(self):
         path = urlparse(self.path).path
-        # /api/bookmarks/<hash>
         if path.startswith("/api/bookmarks/"):
             h = path[len("/api/bookmarks/"):]
             data = load_store()
             if h in data["bookmarks"]:
                 del data["bookmarks"][h]
                 save_store(data)
+                return self._json_response(200, {"ok": True})
+            return self._json_response(404, {"error": "not found"})
+        if path.startswith("/api/notes/"):
+            h = path[len("/api/notes/"):]
+            p = note_path(h)
+            if p.exists():
+                p.unlink()
                 return self._json_response(200, {"ok": True})
             return self._json_response(404, {"error": "not found"})
         self.send_error(404)

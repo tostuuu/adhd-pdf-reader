@@ -1,24 +1,38 @@
 #!/bin/bash
 # build_app.sh — build a self-contained "Focus PDF Reader.app" for macOS.
 # Re-run this whenever you edit the web files.
+#
+# One-click design:
+#   - Double-clicking the app ALWAYS restarts the background server with the
+#     latest files, then opens Chrome. No separate "Stop" helper needed.
+#   - The server only lives while you want to read; relaunching is clean.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Focus PDF Reader"
 APP_DIR="${APP_NAME}.app"
 PORT=8765
+BUILD_VERSION="$(date +%Y%m%d-%H%M)"
 
-echo "Building ${APP_DIR}..."
+echo "Building ${APP_DIR} (build ${BUILD_VERSION})..."
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources/www"
 
-# 1. Copy web assets and the Python backend into the bundle
-cp index.html styles.css app.js sw.js manifest.webmanifest icon.svg \
+# 1. Copy web assets and the Python backend into the bundle.
+# NOTE: we deliberately do NOT ship sw.js any more. This is a local app, so the
+# service worker added caching complexity with zero benefit and was a frequent
+# source of "stale code" bugs. The page actively unregisters any legacy SWs.
+cp index.html styles.css app.js manifest.webmanifest icon.svg \
    "${APP_DIR}/Contents/Resources/www/"
 cp server.py "${APP_DIR}/Contents/Resources/server.py"
 
-# 2. Generate the ICNS icon from icon.svg
+# Stamp the build into the page so it's visible in the top bar.
+# We replace the sentinel "__BUILD__" string at build time.
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/index.html"
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/app.js"
+
+# 2. Generate the ICNS icon from icon.svg.
 ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "${ICONSET_DIR}"
 for size in 16 32 128 256 512; do
@@ -30,7 +44,7 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "${ICONSET_DIR}" -o "${APP_DIR}/Contents/Resources/AppIcon.icns"
 
-# 3. Launcher executable: starts the server (if not running), opens Chrome, exits.
+# 3. Launcher: kill any previous server, start a fresh one, open Chrome.
 cat > "${APP_DIR}/Contents/MacOS/launcher" <<SH
 #!/bin/bash
 set -u
@@ -41,27 +55,52 @@ URL="http://localhost:\${PORT}/"
 PID_FILE="/tmp/focuspdf.\${PORT}.pid"
 LOG_FILE="/tmp/focuspdf.\${PORT}.log"
 
-# Start server if not already running
-if [ -f "\${PID_FILE}" ] && kill -0 "\$(cat "\${PID_FILE}")" 2>/dev/null; then
-  :
-else
-  export FOCUSPDF_PORT="\${PORT}"
-  nohup /usr/bin/env python3 "\${BUNDLE_DIR}/Resources/server.py" "\${WEBROOT}" >"\${LOG_FILE}" 2>&1 &
-  echo \$! > "\${PID_FILE}"
-  sleep 0.4
+# Always stop any previous server so every launch runs the newest code.
+if [ -f "\${PID_FILE}" ]; then
+  OLD=\$(cat "\${PID_FILE}" 2>/dev/null || true)
+  [ -n "\${OLD}" ] && kill "\${OLD}" 2>/dev/null || true
+  rm -f "\${PID_FILE}"
 fi
+# Belt-and-suspenders: also free the port in case something else grabbed it.
+OTHER=\$(lsof -tiTCP:\${PORT} -sTCP:LISTEN 2>/dev/null | head -1 || true)
+[ -n "\${OTHER}" ] && kill "\${OTHER}" 2>/dev/null || true
 
-# Open in Chrome if installed, else default browser
+export FOCUSPDF_PORT="\${PORT}"
+nohup /usr/bin/env python3 "\${BUNDLE_DIR}/Resources/server.py" "\${WEBROOT}" >"\${LOG_FILE}" 2>&1 &
+echo \$! > "\${PID_FILE}"
+sleep 0.4
+
+# Unique URL per launch so Chrome doesn't focus a stale tab showing old code.
+STAMP=\$(date +%s)
+FRESH_URL="\${URL}?t=\${STAMP}"
+
 if [ -d "/Applications/Google Chrome.app" ]; then
-  open -a "Google Chrome" "\${URL}"
+  # Close any existing Focus PDF tabs first, then open a fresh one.
+  # Using AppleScript — safely no-ops if Chrome isn't running yet.
+  /usr/bin/osascript <<'APPLESCRIPT' 2>/dev/null || true
+tell application "System Events"
+  if (name of processes) contains "Google Chrome" then
+    tell application "Google Chrome"
+      set winList to every window
+      repeat with w in winList
+        set tabList to every tab of w
+        repeat with t in tabList
+          if (URL of t contains "localhost:8765") then close t
+        end repeat
+      end repeat
+    end tell
+  end if
+end tell
+APPLESCRIPT
+  open -a "Google Chrome" "\${FRESH_URL}"
 else
-  open "\${URL}"
+  open "\${FRESH_URL}"
 fi
 SH
 chmod +x "${APP_DIR}/Contents/MacOS/launcher"
 
-# 4. Info.plist — marks it as a proper macOS app with our icon.
-cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
+# 4. Info.plist
+cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -69,8 +108,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Focus PDF Reader</string>
   <key>CFBundleDisplayName</key><string>Focus PDF Reader</string>
   <key>CFBundleIdentifier</key><string>com.joan.focuspdf</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${BUILD_VERSION}</string>
   <key>CFBundleExecutable</key><string>launcher</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -81,44 +120,12 @@ cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# 5. Also bundle a small "Stop Focus PDF.app" helper that shuts the server down.
-STOP_APP="Stop Focus PDF.app"
-rm -rf "${STOP_APP}"
-mkdir -p "${STOP_APP}/Contents/MacOS"
-mkdir -p "${STOP_APP}/Contents/Resources"
-cp "${APP_DIR}/Contents/Resources/AppIcon.icns" "${STOP_APP}/Contents/Resources/AppIcon.icns"
-cat > "${STOP_APP}/Contents/MacOS/launcher" <<SH
-#!/bin/bash
-PID_FILE="/tmp/focuspdf.${PORT}.pid"
-if [ -f "\${PID_FILE}" ]; then
-  kill "\$(cat "\${PID_FILE}")" 2>/dev/null || true
-  rm -f "\${PID_FILE}"
-fi
-SH
-chmod +x "${STOP_APP}/Contents/MacOS/launcher"
-cat > "${STOP_APP}/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>Stop Focus PDF</string>
-  <key>CFBundleDisplayName</key><string>Stop Focus PDF</string>
-  <key>CFBundleIdentifier</key><string>com.joan.focuspdf.stop</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleExecutable</key><string>launcher</string>
-  <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>LSUIElement</key><true/>
-</dict>
-</plist>
-PLIST
-
-# Remove quarantine flags so macOS doesn't complain on first open.
+# Remove quarantine so macOS doesn't complain.
 xattr -dr com.apple.quarantine "${APP_DIR}" 2>/dev/null || true
-xattr -dr com.apple.quarantine "${STOP_APP}" 2>/dev/null || true
+
+# Delete the old "Stop Focus PDF.app" helper — no longer needed.
+rm -rf "Stop Focus PDF.app"
 
 echo ""
-echo "Built: ${APP_DIR}"
-echo "Built: ${STOP_APP}"
-echo ""
-echo "Drag \"${APP_DIR}\" into /Applications (or the Dock) to use it from anywhere."
+echo "Built: ${APP_DIR} (v${BUILD_VERSION})"
+echo "Double-click it — every launch restarts the server with the latest code."

@@ -8,7 +8,7 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="apple-touch-icon" href="icon.svg" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=__BUILD__" />
 </head>
 <body>
   <header id="topbar">
@@ -28,7 +28,9 @@
       <button id="zoomFit" title="Fit width (F)">Fit</button>
       <button id="zoomIn" title="Zoom in (])">+</button>
       <span class="sep"></span>
+      <button id="notesBtn" title="Notes (N)">📝 Notes</button>
       <button id="settingsBtn" title="Settings">⚙</button>
+      <span id="buildStamp" class="muted small" title="Build timestamp — confirms you're running the latest version">__BUILD__</span>
     </div>
   </header>
 
@@ -85,6 +87,18 @@
     <div id="drop-hint">Drop a PDF here, or click <b>Open PDF</b></div>
   </main>
 
+  <!-- Notes: one textarea, loads/saves a .txt file per PDF. That's it. -->
+  <div id="notesOverlay" class="overlay" hidden>
+    <div class="notes-modal" role="dialog" aria-modal="true" aria-labelledby="notesTitle">
+      <header>
+        <h2 id="notesTitle">Notes</h2>
+        <span id="notesStatus" class="muted small">No PDF open</span>
+        <button id="notesClose" title="Close (Esc)">✕</button>
+      </header>
+      <textarea id="notesArea" placeholder="Type your notes here — autosaved to a .txt file next to your bookmarks."></textarea>
+    </div>
+  </div>
+
   <aside id="controls">
     <button id="playBtn" title="Play / Pause (Space)">▶ Play</button>
     <div class="ctrl">
@@ -106,19 +120,35 @@
     </div>
     <div id="bookmarkInfo" class="muted small" hidden></div>
     <div id="shortcutsHint" class="muted small">
-      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart page · B pin · G go · click to jump
+      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart · B pin · G go · N notes · Esc close · click to jump
     </div>
   </aside>
 
-  <script type="module" src="./app.js"></script>
   <script>
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("./sw.js").catch((e) =>
-          console.warn("SW registration failed:", e)
-        );
-      });
-    }
+    // This is a LOCAL app served from your own machine — we don't need a
+    // service worker for offline support, and past caching bugs all came from
+    // stale SW-controlled responses. Kill any SW from previous versions and
+    // clear its caches so we always load the freshest code from the server.
+    (async () => {
+      try {
+        if ("serviceWorker" in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          if (regs.length) {
+            await Promise.all(regs.map(r => r.unregister()));
+            console.log("[focuspdf] unregistered", regs.length, "legacy service worker(s)");
+          }
+        }
+        if (window.caches) {
+          const keys = await caches.keys();
+          if (keys.length) {
+            await Promise.all(keys.map(k => caches.delete(k)));
+            console.log("[focuspdf] cleared", keys.length, "legacy cache(s)");
+          }
+        }
+      } catch (e) { console.warn("[focuspdf] cache cleanup:", e); }
+    })();
+
   </script>
+  <script type="module" src="./app.js?v=__BUILD__"></script>
 </body>
 </html>

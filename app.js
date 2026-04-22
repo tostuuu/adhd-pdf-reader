@@ -311,6 +311,8 @@ async function loadPdfFromBuffer(buf) {
   updateBookmarkMarker();
   updateBookmarkUI();
   scrollToCurrent(true);
+  // If the Notes modal happens to be open for a previous PDF, swap in the new one.
+  if (typeof refreshNotesForCurrentPdf === "function") refreshNotesForCurrentPdf();
 }
 
 // ---------- Text extraction: items -> lines -> words ----------
@@ -459,6 +461,9 @@ async function renderPage(idx) {
     p.pageDiv.appendChild(canvas);
     await p.page.render({ canvasContext: ctx, viewport: vp }).promise;
     p.rendered = true;
+    // A newly-rendered page can shift neighbouring pages by fractions of a px;
+    // resync overlays so nothing drifts off the current line.
+    requestAnimationFrame(recomputeOverlays);
   } finally {
     p.rendering = false;
   }
@@ -470,9 +475,49 @@ async function ensurePageRendered(idx) {
   if (!p.rendered) await renderPage(idx);
 }
 
+// Single source of truth for every overlay that sits on top of a page.
+// Safe to call at any time — bails out cleanly when nothing is loaded.
+function recomputeOverlays() {
+  if (!state.allWords.length) return;
+  updateHighlight();
+  updateBookmarkMarker();
+}
+
 // ---------- Zoom ----------
+// Capture which page is centered in the viewport and how far down it we are,
+// so we can restore the same visual anchor after the layout rescales.
+function captureViewportAnchor() {
+  if (!state.pages.length) return null;
+  const vRect = viewerWrap.getBoundingClientRect();
+  const focalY = vRect.top + vRect.height / 2;
+  for (let i = 0; i < state.pages.length; i++) {
+    const r = state.pages[i].pageDiv.getBoundingClientRect();
+    if (r.bottom < vRect.top) continue;
+    if (r.top > vRect.bottom) {
+      // Past the viewport: anchor to the first page below
+      return { pageIdx: i, frac: 0 };
+    }
+    const frac = Math.max(0, Math.min(1, (focalY - r.top) / Math.max(1, r.height)));
+    return { pageIdx: i, frac };
+  }
+  // Everything scrolled past — anchor to the last page bottom
+  return { pageIdx: state.pages.length - 1, frac: 1 };
+}
+
+function restoreViewportAnchor(anchor) {
+  if (!anchor) return;
+  const p = state.pages[anchor.pageIdx];
+  if (!p) return;
+  const vRect = viewerWrap.getBoundingClientRect();
+  const r = p.pageDiv.getBoundingClientRect();
+  const pageTopInScroll = r.top - vRect.top + viewerWrap.scrollTop;
+  const targetY = pageTopInScroll + r.height * anchor.frac - vRect.height / 2;
+  viewerWrap.scrollTop = Math.max(0, targetY);
+}
+
 async function setZoom(z) {
   if (!state.pdfDoc) return;
+  const anchor = captureViewportAnchor();
   state.zoom = Math.max(0.4, Math.min(4, z));
   for (const p of state.pages) {
     p.rendered = false;
@@ -485,8 +530,12 @@ async function setZoom(z) {
   }
   await extractAllText();
   setupLazyRender();
-  updateHighlight();
-  updateBookmarkMarker();
+  // Wait for the browser to apply the new page sizes before measuring, so the
+  // yellow highlight and bookmark marker land on the new coordinates, not the
+  // old ones. Two rAFs guarantees a full style+layout pass.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  restoreViewportAnchor(anchor);
+  recomputeOverlays();
   saveCurrentBookmark();
 }
 
@@ -606,18 +655,32 @@ function updateHighlight() {
   const pageOffsetTop = pRect.top - vRect.top;
   const pageOffsetLeft = pRect.left - vRect.left;
 
-  // Vertical padding so the band covers ascenders AND descenders evenly.
-  const padV = Math.max(4, first.height * 0.30);
-  const padH = 4;
+  // Vertical padding: we want just enough to cover ascenders/descenders,
+  // but never so much that the band bleeds into the previous or next line.
+  // Base: 18% of font height with a 2px floor.
+  const basePad = Math.max(2, first.height * 0.18);
+  const prevLine = state.allLines[first.lineIdx - 1];
+  const nextLine = state.allLines[first.lineIdx + 1];
+  let padTop = basePad;
+  if (prevLine && prevLine.pageIndex === first.pageIndex) {
+    const gap = first.top - (prevLine.top + prevLine.height);
+    padTop = Math.max(1, Math.min(basePad, gap / 2));
+  }
+  let padBot = basePad;
+  if (nextLine && nextLine.pageIndex === first.pageIndex) {
+    const gap = nextLine.top - (first.top + first.height);
+    padBot = Math.max(1, Math.min(basePad, gap / 2));
+  }
+  const padH = 3;
 
   const leftCss = first.left;
   const rightCss = last.left + last.width;
 
   h.hidden = false;
-  h.style.top = (pageOffsetTop + first.top - padV) + "px";
+  h.style.top = (pageOffsetTop + first.top - padTop) + "px";
   h.style.left = (pageOffsetLeft + leftCss - padH) + "px";
   h.style.width = (rightCss - leftCss + padH * 2) + "px";
-  h.style.height = (first.height + padV * 2) + "px";
+  h.style.height = (first.height + padTop + padBot) + "px";
 
   pageInfoEl.textContent = `${first.pageIndex + 1} / ${state.numPages}`;
 }
@@ -656,9 +719,41 @@ function togglePlay() {
   state.playing ? stopPlaying() : startPlaying();
 }
 
+// Duration for displaying a single "word chunk" — modulated by word length
+// and trailing punctuation, per the Animated Dynamic Highlighting research.
+// Base is the time per average-length word at the user's WPM; longer words
+// get more time, and sentence/clause boundaries get natural pauses.
+function wordDurationMs(idx) {
+  const base = 60000 / Math.max(1, state.wpm);
+  const w = state.allWords[idx];
+  if (!w) return base;
+  // Length factor: characters / 5 (≈ avg English word), clamped to avoid extremes.
+  const lenFactor = Math.max(0.55, Math.min(1.9, w.str.length / 5));
+  // Punctuation at the end of a word → brief phrase/sentence pause.
+  const last = w.str.slice(-1);
+  let punctFactor = 1;
+  if (".!?".includes(last)) punctFactor = 1.7;        // sentence end
+  else if (",;:".includes(last)) punctFactor = 1.25;  // clause break
+  else if (")]}\"'”’".includes(last)) punctFactor = 1.1;
+  // Divide by bandSize so WPM stays a meaningful words-per-minute target even
+  // when several words are shown at once.
+  return (base * lenFactor * punctFactor) / Math.max(1, state.bandSize);
+}
+
+// Brief opacity "tick" when the band moves — mimics a saccade landing,
+// helping the eye re-find the focus point after an instant position jump.
+function pulseHighlight() {
+  const h = state.highlightEl;
+  if (!h || h.hidden) return;
+  h.classList.add("tick");
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => h.classList.remove("tick"));
+  });
+}
+
 function scheduleNext() {
   if (!state.playing) return;
-  const ms = 60000 / Math.max(1, state.wpm);
+  const ms = wordDurationMs(state.currentWordIdx);
   state.advanceTimer = setTimeout(() => {
     if (!state.playing) return;
     if (state.currentWordIdx >= state.allWords.length - 1) {
@@ -667,6 +762,7 @@ function scheduleNext() {
     }
     state.currentWordIdx++;
     updateHighlight();
+    pulseHighlight();
     scrollToCurrent();
     saveCurrentBookmark();
     scheduleNext();
@@ -801,15 +897,25 @@ zoomOutBtn.addEventListener("click", () => setZoom(state.zoom / 1.15));
 zoomFitBtn.addEventListener("click", fitWidth);
 
 let resizeRaf = null;
-window.addEventListener("resize", () => {
+function scheduleOverlayRecompute() {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
-    updateHighlight();
-    updateBookmarkMarker();
+    resizeRaf = null;
+    recomputeOverlays();
   });
-});
+}
+
+window.addEventListener("resize", scheduleOverlayRecompute);
+
+// Fires on any size change of the viewer — including zoom, page loading,
+// and fit-to-width. Guarantees the yellow band never drifts out of sync.
+if (typeof ResizeObserver !== "undefined") {
+  const viewerResizeObserver = new ResizeObserver(scheduleOverlayRecompute);
+  viewerResizeObserver.observe(viewer);
+}
+
 viewerWrap.addEventListener("scroll", () => {
-  // marker is positioned within #viewer so it scrolls naturally; nothing to do
+  // Marker is inside #viewer so it scrolls naturally; nothing to do here.
 });
 
 // ---------- Graceful shutdown ----------
@@ -962,8 +1068,13 @@ document.addEventListener("keydown", (e) => {
       }
       break;
     }
+    case "n":
+    case "N":
+      toggleNotes();
+      break;
     case "Escape":
       if (!settingsOverlay.hidden) { closeSettings(); break; }
+      if (!notesOverlay.hidden) { closeNotes(); break; }
       stopPlaying();
       break;
   }
@@ -1242,6 +1353,91 @@ async function relinkBookmark(hash) {
   await saveStoreNow();
   renderBookmarksList();
 }
+
+// ---------- Notes ----------
+// Dead simple: one modal, one textarea. Per-PDF notes are stored as plain
+// .txt files at ~/Library/Application Support/FocusPDFReader/notes/<hash>.txt.
+// The server creates the file on first PUT. That's it.
+const notesBtn = $("notesBtn");
+const notesOverlay = $("notesOverlay");
+const notesCloseBtn = $("notesClose");
+const notesArea = $("notesArea");
+const notesStatusEl = $("notesStatus");
+
+let notesSaveTimer = null;
+let notesLoadedHash = null;   // which PDF's note is currently in the textarea
+
+async function loadNote(hash) {
+  const res = await fetch(`/api/notes/${encodeURIComponent(hash)}`, { cache: "no-store" });
+  return res.ok ? await res.text() : "";
+}
+async function saveNote(hash, text) {
+  const res = await fetch(`/api/notes/${encodeURIComponent(hash)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: text,
+  });
+  return res.ok;
+}
+
+async function openNotes() {
+  if (!state.fileHash) {
+    alert("Open a PDF first — notes are saved per PDF.");
+    return;
+  }
+  notesOverlay.hidden = false;
+  notesArea.disabled = true;
+  notesStatusEl.textContent = "Loading…";
+  const text = await loadNote(state.fileHash);
+  notesArea.value = text;
+  notesArea.disabled = false;
+  notesLoadedHash = state.fileHash;
+  notesStatusEl.textContent = text ? `${text.length} chars` : "Empty — start typing.";
+  notesArea.focus();
+}
+
+async function flushNoteNow() {
+  if (!notesLoadedHash) return;
+  if (notesSaveTimer) { clearTimeout(notesSaveTimer); notesSaveTimer = null; }
+  await saveNote(notesLoadedHash, notesArea.value);
+}
+
+async function closeNotes() {
+  await flushNoteNow();
+  notesOverlay.hidden = true;
+}
+
+function toggleNotes() {
+  notesOverlay.hidden ? openNotes() : closeNotes();
+}
+
+// If the user opens a different PDF while the modal is open, reload for it.
+async function refreshNotesForCurrentPdf() {
+  if (notesOverlay.hidden) return;
+  if (notesLoadedHash === state.fileHash) return;
+  await flushNoteNow();
+  await openNotes();
+}
+
+notesBtn.addEventListener("click", toggleNotes);
+notesCloseBtn.addEventListener("click", closeNotes);
+// Click on the dim backdrop (but not on the modal itself) closes too.
+notesOverlay.addEventListener("click", (e) => {
+  if (e.target === notesOverlay) closeNotes();
+});
+
+notesArea.addEventListener("input", () => {
+  if (!notesLoadedHash) return;
+  notesStatusEl.textContent = "Saving…";
+  if (notesSaveTimer) clearTimeout(notesSaveTimer);
+  notesSaveTimer = setTimeout(async () => {
+    const ok = await saveNote(notesLoadedHash, notesArea.value);
+    notesStatusEl.textContent = ok ? `Saved · ${notesArea.value.length} chars` : "Save failed";
+  }, 400);
+});
+
+// On tab blur, flush any pending save so nothing is lost when you switch away.
+notesArea.addEventListener("blur", () => { flushNoteNow(); });
 
 // ---------- Startup ----------
 (async function init() {
