@@ -1,10 +1,11 @@
 // Focus PDF Reader — ADHD-friendly PDF reader with a moving highlight band.
 // Runs as a local web app. Open in Chrome so your existing extensions keep working.
 
-import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs";
+// Bundled PDF.js 4.7.76 — loaded from the app's own www/ folder so the
+// reader works offline. Previously these came from cdn.jsdelivr.net, which
+// meant no internet = the module never loaded and nothing worked.
+import * as pdfjsLib from "./vendor/pdfjs/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.min.mjs";
 
 // ---------- State ----------
 const state = {
@@ -460,12 +461,50 @@ async function renderPage(idx) {
     p.pageDiv.innerHTML = "";
     p.pageDiv.appendChild(canvas);
     await p.page.render({ canvasContext: ctx, viewport: vp }).promise;
+    // Invisible, selectable text on top of the canvas. We let PDF.js handle
+    // this — its TextLayer matches the browser's selection geometry
+    // expectations far better than hand-rolled spans (continuous blue
+    // highlight, correct direction when dragging up/down, etc.).
+    await buildSelectionLayer(p, vp);
     p.rendered = true;
     // A newly-rendered page can shift neighbouring pages by fractions of a px;
     // resync overlays so nothing drifts off the current line.
     requestAnimationFrame(recomputeOverlays);
   } finally {
     p.rendering = false;
+  }
+}
+
+// Invisible selectable text using PDF.js's own TextLayer. It mirrors the
+// geometry of the rendered PDF so the browser's selection rectangles are
+// continuous (not per-word blocks) and drag direction feels natural.
+async function buildSelectionLayer(p, viewport) {
+  const container = document.createElement("div");
+  container.className = "textLayer";
+  // PDF.js's text layer reads this CSS variable to compute font sizes.
+  container.style.setProperty("--scale-factor", viewport.scale);
+  p.pageDiv.appendChild(container);
+  try {
+    const textContent = await p.page.getTextContent();
+    // Version-agnostic: class-based API on pdfjs-dist >= 4.x,
+    // function-based fallback for older builds.
+    if (pdfjsLib.TextLayer) {
+      const textLayer = new pdfjsLib.TextLayer({
+        textContentSource: textContent,
+        container,
+        viewport,
+      });
+      await textLayer.render();
+    } else if (pdfjsLib.renderTextLayer) {
+      await pdfjsLib.renderTextLayer({
+        textContentSource: textContent,
+        container,
+        viewport,
+      }).promise;
+    }
+  } catch (e) {
+    console.warn("[focuspdf] text layer render failed:", e);
+    container.remove();
   }
 }
 
@@ -854,20 +893,25 @@ fileInput.addEventListener("change", async (e) => {
   fileInput.value = "";
 });
 
+// Catch drag + drop at the document level so Chrome never gets a chance to
+// navigate away to display the PDF directly. (Previously we only listened on
+// #viewer-wrap — dropping on the topbar, around the notes window, or any
+// gutter fell through to Chrome's default PDF handler.)
 ["dragenter", "dragover"].forEach((ev) =>
-  viewerWrap.addEventListener(ev, (e) => {
+  document.addEventListener(ev, (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
     e.preventDefault();
     viewerWrap.classList.add("dragover");
   })
 );
-["dragleave", "drop"].forEach((ev) =>
-  viewerWrap.addEventListener(ev, (e) => {
-    e.preventDefault();
-    viewerWrap.classList.remove("dragover");
-  })
+["dragleave", "dragend"].forEach((ev) =>
+  document.addEventListener(ev, () => viewerWrap.classList.remove("dragover"))
 );
-viewerWrap.addEventListener("drop", async (e) => {
-  const file = e.dataTransfer?.files?.[0];
+document.addEventListener("drop", async (e) => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+  e.preventDefault();
+  viewerWrap.classList.remove("dragover");
+  const file = e.dataTransfer.files?.[0];
   if (file && (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"))) {
     await loadFromFile(file);
   }
@@ -940,6 +984,8 @@ window.addEventListener("pagehide", gracefulShutdown);
 window.addEventListener("beforeunload", gracefulShutdown);
 
 // Click anywhere on a page to move the highlight to the nearest word.
+// (Browsers don't fire `click` after a real drag-select, so selecting text
+// by dragging naturally won't jump the highlight. A single click will.)
 viewer.addEventListener("click", (e) => {
   if (!state.pdfDoc || !state.allWords.length) return;
   const pageEl = e.target.closest && e.target.closest(".page");
@@ -1355,17 +1401,20 @@ async function relinkBookmark(hash) {
 }
 
 // ---------- Notes ----------
-// Dead simple: one modal, one textarea. Per-PDF notes are stored as plain
-// .txt files at ~/Library/Application Support/FocusPDFReader/notes/<hash>.txt.
-// The server creates the file on first PUT. That's it.
+// Floating window — doesn't block the PDF. You can read and take notes at the
+// same time, drag it by its header, and resize via the bottom-right grip.
+// Per-PDF notes are stored as plain .txt files at
+//   ~/Library/Application Support/FocusPDFReader/notes/<hash>.txt
+// The server creates the file on first PUT.
 const notesBtn = $("notesBtn");
-const notesOverlay = $("notesOverlay");
+const notesWindow = $("notesWindow");
 const notesCloseBtn = $("notesClose");
+const notesDragHandle = $("notesDragHandle");
 const notesArea = $("notesArea");
 const notesStatusEl = $("notesStatus");
 
 let notesSaveTimer = null;
-let notesLoadedHash = null;   // which PDF's note is currently in the textarea
+let notesLoadedHash = null;
 
 async function loadNote(hash) {
   const res = await fetch(`/api/notes/${encodeURIComponent(hash)}`, { cache: "no-store" });
@@ -1385,7 +1434,8 @@ async function openNotes() {
     alert("Open a PDF first — notes are saved per PDF.");
     return;
   }
-  notesOverlay.hidden = false;
+  notesWindow.hidden = false;
+  applyNotesGeometry();
   notesArea.disabled = true;
   notesStatusEl.textContent = "Loading…";
   const text = await loadNote(state.fileHash);
@@ -1404,16 +1454,16 @@ async function flushNoteNow() {
 
 async function closeNotes() {
   await flushNoteNow();
-  notesOverlay.hidden = true;
+  notesWindow.hidden = true;
 }
 
 function toggleNotes() {
-  notesOverlay.hidden ? openNotes() : closeNotes();
+  notesWindow.hidden ? openNotes() : closeNotes();
 }
 
-// If the user opens a different PDF while the modal is open, reload for it.
+// If the user opens a different PDF while the window is open, reload for it.
 async function refreshNotesForCurrentPdf() {
-  if (notesOverlay.hidden) return;
+  if (notesWindow.hidden) return;
   if (notesLoadedHash === state.fileHash) return;
   await flushNoteNow();
   await openNotes();
@@ -1421,10 +1471,6 @@ async function refreshNotesForCurrentPdf() {
 
 notesBtn.addEventListener("click", toggleNotes);
 notesCloseBtn.addEventListener("click", closeNotes);
-// Click on the dim backdrop (but not on the modal itself) closes too.
-notesOverlay.addEventListener("click", (e) => {
-  if (e.target === notesOverlay) closeNotes();
-});
 
 notesArea.addEventListener("input", () => {
   if (!notesLoadedHash) return;
@@ -1436,8 +1482,98 @@ notesArea.addEventListener("input", () => {
   }, 400);
 });
 
-// On tab blur, flush any pending save so nothing is lost when you switch away.
 notesArea.addEventListener("blur", () => { flushNoteNow(); });
+
+// --- Window geometry: drag + resize, persisted across sessions ---
+// Saved as {left, top, width, height} in localStorage. Survives app restarts.
+const NOTES_GEOM_KEY = "focuspdf_notes_geom";
+
+function clampToViewport(g) {
+  const maxW = window.innerWidth;
+  const maxH = window.innerHeight;
+  const w = Math.max(260, Math.min(g.width || 420, maxW));
+  const h = Math.max(180, Math.min(g.height || 520, maxH - 10));
+  // Keep at least 80px of the header on-screen so you can always grab it.
+  const left = Math.max(-w + 80, Math.min(g.left ?? (maxW - w - 20), maxW - 80));
+  const top = Math.max(0, Math.min(g.top ?? 72, maxH - 40));
+  return { left, top, width: w, height: h };
+}
+
+function loadNotesGeometry() {
+  try {
+    const raw = localStorage.getItem(NOTES_GEOM_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveNotesGeometry(g) {
+  try { localStorage.setItem(NOTES_GEOM_KEY, JSON.stringify(g)); } catch {}
+}
+
+function applyNotesGeometry() {
+  const saved = loadNotesGeometry();
+  if (!saved) return;  // let CSS defaults apply
+  const g = clampToViewport(saved);
+  notesWindow.style.left = `${g.left}px`;
+  notesWindow.style.top = `${g.top}px`;
+  notesWindow.style.right = "auto";
+  notesWindow.style.width = `${g.width}px`;
+  notesWindow.style.height = `${g.height}px`;
+}
+
+function currentGeometry() {
+  const r = notesWindow.getBoundingClientRect();
+  return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+}
+
+// Drag by the header.
+(function wireDrag() {
+  let dragging = false;
+  let offX = 0, offY = 0;
+  notesDragHandle.addEventListener("mousedown", (e) => {
+    // Don't start a drag when the user clicks the close button.
+    if (e.target.closest("#notesClose")) return;
+    dragging = true;
+    notesDragHandle.classList.add("dragging");
+    const r = notesWindow.getBoundingClientRect();
+    offX = e.clientX - r.left;
+    offY = e.clientY - r.top;
+    // Lock in pixel position so subsequent left/top updates work regardless of
+    // whether the window was originally placed via `right:` in CSS.
+    notesWindow.style.left = `${r.left}px`;
+    notesWindow.style.top = `${r.top}px`;
+    notesWindow.style.right = "auto";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const g = clampToViewport({
+      left: e.clientX - offX,
+      top: e.clientY - offY,
+      width: notesWindow.offsetWidth,
+      height: notesWindow.offsetHeight,
+    });
+    notesWindow.style.left = `${g.left}px`;
+    notesWindow.style.top = `${g.top}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    notesDragHandle.classList.remove("dragging");
+    saveNotesGeometry(currentGeometry());
+  });
+})();
+
+// Save size after the user finishes resizing (native CSS resize grip).
+new ResizeObserver(() => {
+  if (notesWindow.hidden) return;
+  saveNotesGeometry(currentGeometry());
+}).observe(notesWindow);
+
+// Keep it on-screen if the user resizes the browser window smaller.
+window.addEventListener("resize", () => {
+  if (notesWindow.hidden) return;
+  applyNotesGeometry();
+});
 
 // ---------- Startup ----------
 (async function init() {

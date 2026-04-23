@@ -25,6 +25,16 @@ mkdir -p "${APP_DIR}/Contents/Resources/www"
 # source of "stale code" bugs. The page actively unregisters any legacy SWs.
 cp index.html styles.css app.js manifest.webmanifest icon.svg \
    "${APP_DIR}/Contents/Resources/www/"
+# Bundled PDF.js — lets the app work offline. Fatal error if missing.
+if [ ! -f "vendor/pdfjs/pdf.min.mjs" ] || [ ! -f "vendor/pdfjs/pdf.worker.min.mjs" ]; then
+  echo "ERROR: vendor/pdfjs/ is missing. Run:"
+  echo "  curl -fsSL -o vendor/pdfjs/pdf.min.mjs https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs"
+  echo "  curl -fsSL -o vendor/pdfjs/pdf.worker.min.mjs https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs"
+  exit 1
+fi
+mkdir -p "${APP_DIR}/Contents/Resources/www/vendor/pdfjs"
+cp vendor/pdfjs/pdf.min.mjs vendor/pdfjs/pdf.worker.min.mjs \
+   "${APP_DIR}/Contents/Resources/www/vendor/pdfjs/"
 cp server.py "${APP_DIR}/Contents/Resources/server.py"
 
 # Stamp the build into the page so it's visible in the top bar.

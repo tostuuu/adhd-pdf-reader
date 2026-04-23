@@ -87,16 +87,14 @@
     <div id="drop-hint">Drop a PDF here, or click <b>Open PDF</b></div>
   </main>
 
-  <!-- Notes: one textarea, loads/saves a .txt file per PDF. That's it. -->
-  <div id="notesOverlay" class="overlay" hidden>
-    <div class="notes-modal" role="dialog" aria-modal="true" aria-labelledby="notesTitle">
-      <header>
-        <h2 id="notesTitle">Notes</h2>
-        <span id="notesStatus" class="muted small">No PDF open</span>
-        <button id="notesClose" title="Close (Esc)">✕</button>
-      </header>
-      <textarea id="notesArea" placeholder="Type your notes here — autosaved to a .txt file next to your bookmarks."></textarea>
-    </div>
+  <!-- Notes: a floating, draggable, resizable window. Doesn't block the PDF. -->
+  <div id="notesWindow" class="notes-window" role="dialog" aria-labelledby="notesTitle" hidden>
+    <header id="notesDragHandle">
+      <h2 id="notesTitle">📝 Notes</h2>
+      <span id="notesStatus" class="muted small">No PDF open</span>
+      <button id="notesClose" title="Close (Esc or N)">✕</button>
+    </header>
+    <textarea id="notesArea" placeholder="Type your notes here — autosaved to a .txt file next to your bookmarks."></textarea>
   </div>
 
   <aside id="controls">
@@ -120,7 +118,7 @@
     </div>
     <div id="bookmarkInfo" class="muted small" hidden></div>
     <div id="shortcutsHint" class="muted small">
-      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart · B pin · G go · N notes · Esc close · click to jump
+      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart · B pin · G go · N notes · click to jump · drag to select
     </div>
   </aside>
 
