@@ -348,10 +348,31 @@ body.has-doc #drop-hint { display: none; }
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
   z-index: 40;
-  /* Native resize grip in the bottom-right corner. */
-  resize: both;
+  /* Custom resize grip below — native CSS resize was being eaten by Quill's
+     editor area, so we draw our own visible handle. */
   overflow: hidden;
 }
+
+#notesResizeGrip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  z-index: 10;
+  /* Diagonal hash marks so it's obvious you can drag. */
+  background:
+    linear-gradient(135deg,
+      transparent 0%, transparent 35%,
+      var(--muted) 35%, var(--muted) 45%,
+      transparent 45%, transparent 60%,
+      var(--muted) 60%, var(--muted) 70%,
+      transparent 70%);
+  border-bottom-right-radius: 12px;
+  opacity: 0.6;
+}
+#notesResizeGrip:hover { opacity: 1; }
 .notes-window[hidden] { display: none; }
 
 #notesDragHandle {
@@ -374,18 +395,100 @@ body.has-doc #drop-hint { display: none; }
 }
 #notesDragHandle #notesClose:hover { color: var(--text); background: var(--btn); }
 
-#notesArea {
+/* Quill toolbar: dark, compact, matches the rest of the panel. */
+#notesToolbar.ql-toolbar.ql-snow {
+  border: none;
+  border-bottom: 1px solid var(--panel-border);
+  background: #1f2128;
+  padding: 4px 8px;
+}
+#notesToolbar .ql-formats { margin-right: 8px; }
+#notesToolbar .ql-stroke { stroke: var(--muted); }
+#notesToolbar .ql-fill { fill: var(--muted); }
+#notesToolbar .ql-picker-label { color: var(--muted); }
+#notesToolbar button:hover .ql-stroke,
+#notesToolbar .ql-picker-label:hover .ql-stroke,
+#notesToolbar button.ql-active .ql-stroke,
+#notesToolbar .ql-picker-label.ql-active .ql-stroke { stroke: var(--text); }
+#notesToolbar button:hover .ql-fill,
+#notesToolbar .ql-picker-label:hover .ql-fill,
+#notesToolbar button.ql-active .ql-fill,
+#notesToolbar .ql-picker-label.ql-active .ql-fill { fill: var(--text); }
+#notesToolbar button:hover,
+#notesToolbar .ql-picker-label:hover,
+#notesToolbar button.ql-active,
+#notesToolbar .ql-picker-label.ql-active { color: var(--text); }
+#notesToolbar .ql-picker-options {
+  background: #262830;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+}
+/* Custom toolbar buttons render their text via a <span class="qbtn"> child
+   to avoid Quill Snow's ::before icons doubling up the glyph. We bump the
+   button width slightly so wide labels like "+R" / "✕▦" don't clip. */
+#notesToolbar button .qbtn {
+  display: inline-block;
+  font-size: 13px;
+  line-height: 18px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+#notesToolbar button:hover .qbtn,
+#notesToolbar button.ql-active .qbtn { color: var(--text); }
+/* Quill Snow gives buttons a fixed 28x24; widen for our wider labels. */
+#notesToolbar .ql-time,
+#notesToolbar .ql-insertTable { width: 30px; }
+#notesToolbar .notes-table-tools button { width: 36px; }
+/* Visual hint: dim the table tools when cursor is not in a table. */
+#notesToolbar.no-table-context .notes-table-tools button {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* The editor area itself — cream paper to match the PDF, dark text. */
+#notesEditor {
   flex: 1;
   background: #fffdf5;
   color: #1a1b1f;
   border: none;
   border-radius: 0 0 12px 12px;
-  padding: 14px 16px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.55;
-  resize: none;  /* the window itself resizes, not the textarea inside */
-  outline: none;
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Quill's contentEditable div, .ql-editor, is what actually receives input. */
+.notes-window .ql-container.ql-snow {
+  border: none;
+  font-family: inherit;
+  font-size: inherit;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
-#notesArea:disabled { background: #ddd8ce; color: #777; cursor: progress; }
+.notes-window .ql-editor {
+  flex: 1;
+  padding: 14px 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.notes-window .ql-editor.ql-blank::before {
+  color: #888;
+  font-style: italic;
+}
+/* Tables Quill produces are minimal — give them a visible grid. */
+.notes-window .ql-editor table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+.notes-window .ql-editor table td {
+  border: 1px solid #c8c2b3;
+  padding: 4px 8px;
+  min-width: 60px;
+}

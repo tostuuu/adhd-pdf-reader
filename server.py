@@ -39,12 +39,14 @@ def _safe_hash(h: str) -> str:
     return "".join(c for c in h if c.isalnum() or c in ("-", "_"))[:128]
 
 
-def note_path(h: str) -> pathlib.Path:
-    return NOTES_DIR / f"{_safe_hash(h)}.txt"
+def note_path(h: str, ext: str = "txt") -> pathlib.Path:
+    """Per-PDF note file. ext='txt' is the legacy plain-text format,
+    'html' is the new rich-text format produced by the Quill editor."""
+    return NOTES_DIR / f"{_safe_hash(h)}.{ext}"
 
 
-def load_note(h: str) -> str:
-    p = note_path(h)
+def load_note(h: str, ext: str = "txt") -> str:
+    p = note_path(h, ext)
     if not p.exists():
         return ""
     try:
@@ -54,9 +56,9 @@ def load_note(h: str) -> str:
         return ""
 
 
-def save_note(h: str, text: str) -> pathlib.Path:
-    p = note_path(h)
-    tmp = p.with_suffix(".txt.tmp")
+def save_note(h: str, text: str, ext: str = "txt") -> pathlib.Path:
+    p = note_path(h, ext)
+    tmp = p.with_suffix(f".{ext}.tmp")
     tmp.write_text(text, "utf-8")
     tmp.replace(p)
     return p
@@ -141,10 +143,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "size": STORE_FILE.stat().st_size if STORE_FILE.exists() else 0,
                 "notesDir": str(NOTES_DIR),
             })
+        if path.startswith("/api/notes-html/"):
+            h = path[len("/api/notes-html/"):]
+            text = load_note(h, "html")
+            self.send_response(200 if text else 404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            body = text.encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path.startswith("/api/notes/"):
             h = path[len("/api/notes/"):]
-            text = load_note(h)
-            self.send_response(200)
+            text = load_note(h, "txt")
+            self.send_response(200 if text else 404)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             body = text.encode("utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -169,6 +181,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             payload.setdefault("bookmarks", {})
             save_store(payload)
             return self._json_response(200, {"ok": True, "path": str(STORE_FILE)})
+        if path.startswith("/api/notes-html/"):
+            h = path[len("/api/notes-html/"):]
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._json_response(400, {"error": "invalid utf-8"})
+            p = save_note(h, text, "html")
+            return self._json_response(200, {"ok": True, "path": str(p), "bytes": len(raw)})
         if path.startswith("/api/notes/"):
             h = path[len("/api/notes/"):]
             length = int(self.headers.get("Content-Length", "0"))
@@ -177,7 +199,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 text = raw.decode("utf-8")
             except UnicodeDecodeError:
                 return self._json_response(400, {"error": "invalid utf-8"})
-            p = save_note(h, text)
+            p = save_note(h, text, "txt")
             return self._json_response(200, {"ok": True, "path": str(p), "bytes": len(raw)})
         self.send_error(404, "Unknown API endpoint")
 
@@ -191,9 +213,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 save_store(data)
                 return self._json_response(200, {"ok": True})
             return self._json_response(404, {"error": "not found"})
+        if path.startswith("/api/notes-html/"):
+            h = path[len("/api/notes-html/"):]
+            p = note_path(h, "html")
+            if p.exists():
+                p.unlink()
+                return self._json_response(200, {"ok": True})
+            return self._json_response(404, {"error": "not found"})
         if path.startswith("/api/notes/"):
             h = path[len("/api/notes/"):]
-            p = note_path(h)
+            p = note_path(h, "txt")
             if p.exists():
                 p.unlink()
                 return self._json_response(200, {"ok": True})

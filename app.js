@@ -1040,7 +1040,9 @@ viewer.addEventListener("click", (e) => {
 // Keyboard shortcuts
 document.addEventListener("keydown", (e) => {
   const t = e.target;
-  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+  // Don't fire reader shortcuts while the user is typing in any input —
+  // including Quill's contentEditable rich-text area for notes.
+  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
 
   switch (e.key) {
     case " ":
@@ -1401,32 +1403,132 @@ async function relinkBookmark(hash) {
 }
 
 // ---------- Notes ----------
-// Floating window — doesn't block the PDF. You can read and take notes at the
-// same time, drag it by its header, and resize via the bottom-right grip.
-// Per-PDF notes are stored as plain .txt files at
-//   ~/Library/Application Support/FocusPDFReader/notes/<hash>.txt
-// The server creates the file on first PUT.
+// Rich-text floating window powered by Quill 2.x. Notes saved as HTML at
+//   ~/Library/Application Support/FocusPDFReader/notes/<hash>.html
+// On first open of a PDF whose .html doesn't exist yet, we auto-migrate the
+// legacy <hash>.txt (if present) into a paragraph block. The .txt is kept
+// on disk untouched as a backup.
 const notesBtn = $("notesBtn");
 const notesWindow = $("notesWindow");
 const notesCloseBtn = $("notesClose");
 const notesDragHandle = $("notesDragHandle");
-const notesArea = $("notesArea");
+const notesEditorEl = $("notesEditor");
 const notesStatusEl = $("notesStatus");
 
 let notesSaveTimer = null;
 let notesLoadedHash = null;
 
-async function loadNote(hash) {
+// --- Quill setup ---
+// Register a custom format for the timestamp button (it just inserts text,
+// but Quill needs a handler entry on the toolbar module to know about it).
+const Quill = window.Quill;
+if (!Quill) {
+  console.error("[focuspdf] Quill failed to load — notes will not work. Check vendor/quill/.");
+}
+
+const quill = Quill ? new Quill(notesEditorEl, {
+  theme: "snow",
+  placeholder: "Take notes — saved automatically per PDF.",
+  modules: {
+    toolbar: {
+      container: "#notesToolbar",
+      handlers: {
+        time: () => insertTimestampInQuill(),
+        insertTable: () => insertTableInQuill(),
+        tableAddRow: () => withTableModule((m) => m.insertRowBelow?.() || m.appendRow?.()),
+        tableAddCol: () => withTableModule((m) => m.insertColumnRight?.() || m.appendColumn?.()),
+        tableDelRow: () => withTableModule((m) => m.deleteRow?.()),
+        tableDelCol: () => withTableModule((m) => m.deleteColumn?.()),
+        tableDelete: () => withTableModule((m) => m.deleteTable?.()),
+      },
+    },
+  },
+}) : null;
+
+// Run a function with the table module if we're inside a table — otherwise
+// no-op. The Quill 2 table API method names vary slightly across patch
+// releases, so each handler tries multiple aliases.
+function withTableModule(fn) {
+  if (!quill) return;
+  const m = quill.getModule("table");
+  if (!m) return;
+  const range = quill.getSelection();
+  if (!range) return;
+  // Simple guard: bail if cursor isn't inside a <td>.
+  const node = quill.getLeaf(range.index)?.[0]?.domNode;
+  const cell = node && (node.closest ? node.closest("td") : null);
+  if (!cell) return;
+  try { fn(m); } catch (e) { console.warn("[focuspdf] table op failed:", e); }
+}
+
+function timestampString() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `[${dateStr} ${days[d.getDay()]} ${timeStr}]`;
+}
+
+function insertTimestampInQuill() {
+  if (!quill) return;
+  const range = quill.getSelection(true);
+  const ts = timestampString();
+  // Insert as bold so the stamp is easy to spot when scanning notes.
+  quill.insertText(range.index, ts, "bold", true, "user");
+  quill.insertText(range.index + ts.length, "\n", "bold", false, "user");
+  quill.setSelection(range.index + ts.length + 1, 0, "user");
+}
+
+function insertTableInQuill() {
+  if (!quill) return;
+  // Quill 2's built-in table module: insert a fixed-size table at the cursor.
+  // Click into a cell to edit. To add/remove rows or columns, place the caret
+  // inside the table and use the toolbar (none yet — TODO if you outgrow this).
+  const tableModule = quill.getModule("table");
+  if (tableModule && typeof tableModule.insertTable === "function") {
+    tableModule.insertTable(3, 3);
+  } else {
+    // Fallback: paste a plain HTML table via the clipboard module so it's
+    // properly normalized by Quill into its document model.
+    const html =
+      "<table><tbody>" +
+      "<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>".repeat(3) +
+      "</tbody></table><p><br></p>";
+    const range = quill.getSelection(true);
+    quill.clipboard.dangerouslyPasteHTML(range.index, html, "user");
+  }
+}
+
+// --- Server I/O (HTML primary, TXT fallback for migration) ---
+async function loadNoteHtml(hash) {
+  const res = await fetch(`/api/notes-html/${encodeURIComponent(hash)}`, { cache: "no-store" });
+  return res.ok ? await res.text() : "";
+}
+async function loadNoteTxt(hash) {
   const res = await fetch(`/api/notes/${encodeURIComponent(hash)}`, { cache: "no-store" });
   return res.ok ? await res.text() : "";
 }
-async function saveNote(hash, text) {
-  const res = await fetch(`/api/notes/${encodeURIComponent(hash)}`, {
+async function saveNoteHtml(hash, html) {
+  const res = await fetch(`/api/notes-html/${encodeURIComponent(hash)}`, {
     method: "PUT",
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-    body: text,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body: html,
   });
   return res.ok;
+}
+
+// Convert plain text into Quill-friendly HTML: each non-empty line becomes
+// a <p>, blank lines become an empty <p><br></p> for spacing.
+function txtToHtml(txt) {
+  const escape = (s) => s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  const lines = txt.split(/\r?\n/);
+  return lines
+    .map((line) => (line.trim() ? `<p>${escape(line)}</p>` : "<p><br></p>"))
+    .join("");
 }
 
 async function openNotes() {
@@ -1434,22 +1536,45 @@ async function openNotes() {
     alert("Open a PDF first — notes are saved per PDF.");
     return;
   }
+  if (!quill) {
+    alert("The notes editor failed to load. Check the browser console.");
+    return;
+  }
   notesWindow.hidden = false;
   applyNotesGeometry();
-  notesArea.disabled = true;
+  quill.disable();
   notesStatusEl.textContent = "Loading…";
-  const text = await loadNote(state.fileHash);
-  notesArea.value = text;
-  notesArea.disabled = false;
+
+  let html = await loadNoteHtml(state.fileHash);
+
+  // Migration path: no .html yet, but maybe a legacy .txt.
+  if (!html) {
+    const legacyTxt = await loadNoteTxt(state.fileHash);
+    if (legacyTxt) {
+      html = txtToHtml(legacyTxt);
+      // Persist the migrated copy immediately so future opens are fast.
+      await saveNoteHtml(state.fileHash, html);
+      console.log("[focuspdf] migrated .txt note to .html for", state.fileHash.slice(0, 10));
+    }
+  }
+
+  // dangerouslyPasteHTML normalizes whatever HTML we feed it — including any
+  // human-edited or migrated content — into Quill's internal Delta model.
+  quill.setContents([], "silent");
+  if (html) {
+    quill.clipboard.dangerouslyPasteHTML(0, html, "silent");
+  }
+  quill.enable();
   notesLoadedHash = state.fileHash;
-  notesStatusEl.textContent = text ? `${text.length} chars` : "Empty — start typing.";
-  notesArea.focus();
+  notesStatusEl.textContent = html ? "Loaded" : "Empty — start typing.";
+  quill.focus();
 }
 
 async function flushNoteNow() {
-  if (!notesLoadedHash) return;
+  if (!notesLoadedHash || !quill) return;
   if (notesSaveTimer) { clearTimeout(notesSaveTimer); notesSaveTimer = null; }
-  await saveNote(notesLoadedHash, notesArea.value);
+  const html = quill.root.innerHTML;
+  await saveNoteHtml(notesLoadedHash, html);
 }
 
 async function closeNotes() {
@@ -1472,17 +1597,35 @@ async function refreshNotesForCurrentPdf() {
 notesBtn.addEventListener("click", toggleNotes);
 notesCloseBtn.addEventListener("click", closeNotes);
 
-notesArea.addEventListener("input", () => {
-  if (!notesLoadedHash) return;
-  notesStatusEl.textContent = "Saving…";
-  if (notesSaveTimer) clearTimeout(notesSaveTimer);
-  notesSaveTimer = setTimeout(async () => {
-    const ok = await saveNote(notesLoadedHash, notesArea.value);
-    notesStatusEl.textContent = ok ? `Saved · ${notesArea.value.length} chars` : "Save failed";
-  }, 400);
-});
+if (quill) {
+  // Fires on any user edit (typing, formatting, paste). 400ms debounce.
+  quill.on("text-change", (_delta, _old, source) => {
+    if (source !== "user" || !notesLoadedHash) return;
+    notesStatusEl.textContent = "Saving…";
+    if (notesSaveTimer) clearTimeout(notesSaveTimer);
+    notesSaveTimer = setTimeout(async () => {
+      const html = quill.root.innerHTML;
+      const ok = await saveNoteHtml(notesLoadedHash, html);
+      notesStatusEl.textContent = ok ? "Saved" : "Save failed";
+    }, 400);
+  });
 
-notesArea.addEventListener("blur", () => { flushNoteNow(); });
+  // Visual feedback: dim the table-edit buttons whenever the cursor isn't
+  // inside a table cell (the buttons themselves no-op there anyway).
+  const notesToolbarEl = $("notesToolbar");
+  function updateTableContext() {
+    const range = quill.getSelection();
+    let inTable = false;
+    if (range) {
+      const node = quill.getLeaf(range.index)?.[0]?.domNode;
+      inTable = !!(node && node.closest && node.closest("td"));
+    }
+    notesToolbarEl.classList.toggle("no-table-context", !inTable);
+  }
+  quill.on("selection-change", updateTableContext);
+  quill.on("text-change", updateTableContext);
+  updateTableContext();
+}
 
 // --- Window geometry: drag + resize, persisted across sessions ---
 // Saved as {left, top, width, height} in localStorage. Survives app restarts.
@@ -1563,7 +1706,43 @@ function currentGeometry() {
   });
 })();
 
-// Save size after the user finishes resizing (native CSS resize grip).
+// Custom resize grip in the bottom-right corner. We use this instead of the
+// CSS `resize: both` because Quill's editor was eating the native handle.
+(function wireResize() {
+  const grip = $("notesResizeGrip");
+  if (!grip) return;
+  let resizing = false;
+  let startX = 0, startY = 0, startW = 0, startH = 0;
+  grip.addEventListener("mousedown", (e) => {
+    resizing = true;
+    const r = notesWindow.getBoundingClientRect();
+    startX = e.clientX;
+    startY = e.clientY;
+    startW = r.width;
+    startH = r.height;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!resizing) return;
+    const g = clampToViewport({
+      left: notesWindow.getBoundingClientRect().left,
+      top: notesWindow.getBoundingClientRect().top,
+      width: startW + (e.clientX - startX),
+      height: startH + (e.clientY - startY),
+    });
+    notesWindow.style.width = `${g.width}px`;
+    notesWindow.style.height = `${g.height}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false;
+    saveNotesGeometry(currentGeometry());
+  });
+})();
+
+// Also persist size if anything else (window resize clamp, future programmatic
+// changes) resizes the panel.
 new ResizeObserver(() => {
   if (notesWindow.hidden) return;
   saveNotesGeometry(currentGeometry());

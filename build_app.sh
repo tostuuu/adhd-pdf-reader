@@ -35,6 +35,18 @@ fi
 mkdir -p "${APP_DIR}/Contents/Resources/www/vendor/pdfjs"
 cp vendor/pdfjs/pdf.min.mjs vendor/pdfjs/pdf.worker.min.mjs \
    "${APP_DIR}/Contents/Resources/www/vendor/pdfjs/"
+
+# Bundled Quill 2.x — rich text editor for the Notes window.
+if [ ! -f "vendor/quill/quill.js" ] || [ ! -f "vendor/quill/quill.snow.css" ]; then
+  echo "ERROR: vendor/quill/ is missing. Run:"
+  echo "  curl -fsSL -o vendor/quill/quill.js https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.js"
+  echo "  curl -fsSL -o vendor/quill/quill.snow.css https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css"
+  exit 1
+fi
+mkdir -p "${APP_DIR}/Contents/Resources/www/vendor/quill"
+cp vendor/quill/quill.js vendor/quill/quill.snow.css \
+   "${APP_DIR}/Contents/Resources/www/vendor/quill/"
+
 cp server.py "${APP_DIR}/Contents/Resources/server.py"
 
 # Stamp the build into the page so it's visible in the top bar.

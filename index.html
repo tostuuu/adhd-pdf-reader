@@ -8,6 +8,7 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="vendor/quill/quill.snow.css?v=__BUILD__" />
   <link rel="stylesheet" href="styles.css?v=__BUILD__" />
 </head>
 <body>
@@ -87,14 +88,60 @@
     <div id="drop-hint">Drop a PDF here, or click <b>Open PDF</b></div>
   </main>
 
-  <!-- Notes: a floating, draggable, resizable window. Doesn't block the PDF. -->
+  <!-- Notes: a floating, draggable, resizable window. Doesn't block the PDF.
+       Rich text via Quill 2.x. Saved as <hash>.html on disk. -->
   <div id="notesWindow" class="notes-window" role="dialog" aria-labelledby="notesTitle" hidden>
     <header id="notesDragHandle">
       <h2 id="notesTitle">📝 Notes</h2>
       <span id="notesStatus" class="muted small">No PDF open</span>
       <button id="notesClose" title="Close (Esc or N)">✕</button>
     </header>
-    <textarea id="notesArea" placeholder="Type your notes here — autosaved to a .txt file next to your bookmarks."></textarea>
+    <div id="notesToolbar">
+      <span class="ql-formats">
+        <select class="ql-header">
+          <option value="1">H1</option>
+          <option value="2">H2</option>
+          <option value="3">H3</option>
+          <option selected>Body</option>
+        </select>
+        <select class="ql-size">
+          <option value="small"></option>
+          <option selected></option>
+          <option value="large"></option>
+          <option value="huge"></option>
+        </select>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-bold" title="Bold (Cmd/Ctrl-B)"></button>
+        <button class="ql-italic" title="Italic (Cmd/Ctrl-I)"></button>
+        <button class="ql-underline" title="Underline"></button>
+        <button class="ql-strike" title="Strikethrough"></button>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-list" value="ordered" title="Numbered list"></button>
+        <button class="ql-list" value="bullet" title="Bullet list"></button>
+        <button class="ql-blockquote" title="Quote"></button>
+        <button class="ql-code-block" title="Code block"></button>
+      </span>
+      <span class="ql-formats">
+        <select class="ql-color" title="Text color"></select>
+        <select class="ql-background" title="Highlight"></select>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-time" title="Insert timestamp"><span class="qbtn">🕒</span></button>
+        <button class="ql-insertTable" title="Insert table"><span class="qbtn">⊞</span></button>
+        <button class="ql-clean" title="Clear formatting"></button>
+      </span>
+      <span class="ql-formats notes-table-tools">
+        <button class="ql-tableAddRow" title="Add row below"><span class="qbtn">＋R</span></button>
+        <button class="ql-tableAddCol" title="Add column right"><span class="qbtn">＋C</span></button>
+        <button class="ql-tableDelRow" title="Delete current row"><span class="qbtn">−R</span></button>
+        <button class="ql-tableDelCol" title="Delete current column"><span class="qbtn">−C</span></button>
+        <button class="ql-tableDelete" title="Delete entire table"><span class="qbtn">✕▦</span></button>
+      </span>
+    </div>
+    <div id="notesEditor"></div>
+    <div id="notesResizeGrip" title="Drag to resize"></div>
   </div>
 
   <aside id="controls">
@@ -147,6 +194,8 @@
     })();
 
   </script>
+  <!-- Quill must load before app.js so window.Quill exists when we init. -->
+  <script src="vendor/quill/quill.js?v=__BUILD__"></script>
   <script type="module" src="./app.js?v=__BUILD__"></script>
 </body>
 </html>
