@@ -669,6 +669,11 @@ function clampWord(i) {
 }
 
 function updateHighlight() {
+  // RSVP window (if open) mirrors the same current word — update it whenever
+  // the reading position changes, regardless of what triggered the change
+  // (play tick, click-to-jump, keyboard nav, pin restore, etc.).
+  if (typeof rsvpRender === "function") rsvpRender();
+
   const h = state.highlightEl;
   if (!h) return;
   if (!state.allWords.length) { h.hidden = true; return; }
@@ -744,11 +749,13 @@ function startPlaying() {
   if (!state.allWords.length) return;
   state.playing = true;
   playBtn.textContent = "⏸ Pause";
+  if (typeof rsvpReflectPlayState === "function") rsvpReflectPlayState();
   scheduleNext();
 }
 function stopPlaying() {
   state.playing = false;
   playBtn.textContent = "▶ Play";
+  if (typeof rsvpReflectPlayState === "function") rsvpReflectPlayState();
   if (state.advanceTimer) {
     clearTimeout(state.advanceTimer);
     state.advanceTimer = null;
@@ -921,6 +928,7 @@ playBtn.addEventListener("click", togglePlay);
 wpmSlider.addEventListener("input", () => {
   state.wpm = Number(wpmSlider.value);
   updateWpmDisplay();
+  if (typeof rsvpReflectWpm === "function") rsvpReflectWpm();
   saveCurrentBookmark();
 });
 bandSlider.addEventListener("input", () => {
@@ -1120,9 +1128,14 @@ document.addEventListener("keydown", (e) => {
     case "N":
       toggleNotes();
       break;
+    case "v":
+    case "V":
+      toggleRsvp();
+      break;
     case "Escape":
       if (!settingsOverlay.hidden) { closeSettings(); break; }
-      if (!notesOverlay.hidden) { closeNotes(); break; }
+      if (notesWindow && !notesWindow.hidden) { closeNotes(); break; }
+      if (rsvpWindow && !rsvpWindow.hidden) { closeRsvp(); break; }
       stopPlaying();
       break;
   }
@@ -1752,6 +1765,254 @@ new ResizeObserver(() => {
 window.addEventListener("resize", () => {
   if (notesWindow.hidden) return;
   applyNotesGeometry();
+});
+
+// ---------- RSVP (Rapid Serial Visual Presentation) ----------
+// Floating, movable, resizable window. Shows the current word one at a time
+// with the Optimal Recognition Point (ORP) letter highlighted in red.
+// IMPORTANT: this is purely additive. It does NOT replace highlight mode.
+// state.currentWordIdx is shared between PDF highlight and RSVP — clicking
+// on the PDF to re-read updates both views; nothing about bookmarks changes.
+
+const rsvpBtn = $("rsvpBtn");
+const rsvpWindow = $("rsvpWindow");
+const rsvpDragHandle = $("rsvpDragHandle");
+const rsvpCloseBtn = $("rsvpClose");
+const rsvpProgressEl = $("rsvpProgress");
+const rsvpPreEl = $("rsvpPre");
+const rsvpOrpEl = $("rsvpOrp");
+const rsvpPostEl = $("rsvpPost");
+const rsvpWordEl = $("rsvpWord");
+const rsvpPlayBtn = $("rsvpPlay");
+const rsvpPrevBtn = $("rsvpPrev");
+const rsvpNextBtn = $("rsvpNext");
+const rsvpWpmSlider = $("rsvpWpm");
+const rsvpWpmVal = $("rsvpWpmVal");
+const rsvpFontSmallerBtn = $("rsvpFontSmaller");
+const rsvpFontBiggerBtn = $("rsvpFontBigger");
+const rsvpResizeGrip = $("rsvpResizeGrip");
+
+// Word-size preference, saved across sessions.
+const RSVP_STYLE_KEY = "focuspdf_rsvp_style";
+const RSVP_STYLE_DEFAULT = { fontSize: 96 };
+const RSVP_FONT_MIN = 36;
+const RSVP_FONT_MAX = 220;
+function loadRsvpStyle() {
+  try {
+    const raw = localStorage.getItem(RSVP_STYLE_KEY);
+    return raw ? { ...RSVP_STYLE_DEFAULT, ...JSON.parse(raw) } : { ...RSVP_STYLE_DEFAULT };
+  } catch { return { ...RSVP_STYLE_DEFAULT }; }
+}
+function saveRsvpStyle(s) {
+  try { localStorage.setItem(RSVP_STYLE_KEY, JSON.stringify(s)); } catch {}
+}
+function applyRsvpStyle() {
+  const s = loadRsvpStyle();
+  rsvpWordEl.style.fontSize = `${s.fontSize}px`;
+}
+
+// Optimal Recognition Point — roughly Spritz's lookup. The eye anchors here
+// while peripheral vision picks up the rest, which is why a single letter
+// (typically the 2nd-4th) gets the red highlight.
+function orpIndex(len) {
+  if (len <= 1) return 0;
+  if (len <= 5) return 1;
+  if (len <= 9) return 2;
+  if (len <= 13) return 3;
+  return 4;
+}
+
+// Re-render the displayed word + progress. Called from updateHighlight()
+// every time state.currentWordIdx changes, regardless of cause.
+function rsvpRender() {
+  if (!rsvpWindow || rsvpWindow.hidden) return;
+  const w = state.allWords[state.currentWordIdx];
+  if (!w) {
+    rsvpPreEl.textContent = "";
+    rsvpOrpEl.textContent = "—";
+    rsvpPostEl.textContent = "";
+    rsvpProgressEl.textContent = "no PDF";
+    return;
+  }
+  const str = w.str;
+  const i = Math.min(orpIndex(str.length), str.length - 1);
+  rsvpPreEl.textContent = str.slice(0, i);
+  rsvpOrpEl.textContent = str.slice(i, i + 1);
+  rsvpPostEl.textContent = str.slice(i + 1);
+  rsvpProgressEl.textContent = `p${w.pageIndex + 1} · w${state.currentWordIdx + 1}/${state.allWords.length}`;
+}
+
+// Reflect the global play/pause state on the RSVP play button so the two
+// stay in sync no matter which one was used to start/stop playback.
+function rsvpReflectPlayState() {
+  if (!rsvpPlayBtn) return;
+  rsvpPlayBtn.textContent = state.playing ? "⏸" : "▶";
+}
+function rsvpReflectWpm() {
+  if (!rsvpWpmSlider) return;
+  rsvpWpmSlider.value = state.wpm;
+  rsvpWpmVal.textContent = `${state.wpm} wpm`;
+}
+
+function openRsvp() {
+  rsvpWindow.hidden = false;
+  applyRsvpGeometry();
+  applyRsvpStyle();
+  rsvpReflectPlayState();
+  rsvpReflectWpm();
+  rsvpRender();
+}
+function closeRsvp() {
+  rsvpWindow.hidden = true;
+}
+function toggleRsvp() {
+  rsvpWindow.hidden ? openRsvp() : closeRsvp();
+}
+
+rsvpBtn.addEventListener("click", toggleRsvp);
+rsvpCloseBtn.addEventListener("click", closeRsvp);
+rsvpPlayBtn.addEventListener("click", togglePlay);
+rsvpPrevBtn.addEventListener("click", () => {
+  if (!state.allWords.length) return;
+  state.currentWordIdx = clampWord(state.currentWordIdx - 1);
+  updateHighlight();
+  scrollToCurrent();
+  saveCurrentBookmark();
+});
+rsvpNextBtn.addEventListener("click", () => {
+  if (!state.allWords.length) return;
+  state.currentWordIdx = clampWord(state.currentWordIdx + 1);
+  updateHighlight();
+  scrollToCurrent();
+  saveCurrentBookmark();
+});
+rsvpWpmSlider.addEventListener("input", () => {
+  state.wpm = Number(rsvpWpmSlider.value);
+  rsvpWpmVal.textContent = `${state.wpm} wpm`;
+  // Keep the main slider in sync too.
+  wpmSlider.value = state.wpm;
+  updateWpmDisplay();
+});
+function bumpRsvpFont(delta) {
+  const s = loadRsvpStyle();
+  s.fontSize = Math.max(RSVP_FONT_MIN, Math.min(RSVP_FONT_MAX, s.fontSize + delta));
+  saveRsvpStyle(s);
+  applyRsvpStyle();
+}
+rsvpFontSmallerBtn.addEventListener("click", () => bumpRsvpFont(-12));
+rsvpFontBiggerBtn.addEventListener("click", () => bumpRsvpFont(+12));
+
+// --- Window geometry: drag + resize, persisted across sessions ---
+// Copy of the Notes window pattern. In a future iteration we'll factor this
+// into a `makeFloating(...)` helper and share with all panels.
+const RSVP_GEOM_KEY = "focuspdf_rsvp_geom";
+
+function clampRsvpToViewport(g) {
+  const maxW = window.innerWidth;
+  const maxH = window.innerHeight;
+  const w = Math.max(320, Math.min(g.width || 520, maxW));
+  const h = Math.max(240, Math.min(g.height || 360, maxH - 10));
+  const left = Math.max(-w + 80, Math.min(g.left ?? 20, maxW - 80));
+  const top = Math.max(0, Math.min(g.top ?? 72, maxH - 40));
+  return { left, top, width: w, height: h };
+}
+function loadRsvpGeometry() {
+  try {
+    const raw = localStorage.getItem(RSVP_GEOM_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveRsvpGeometry(g) {
+  try { localStorage.setItem(RSVP_GEOM_KEY, JSON.stringify(g)); } catch {}
+}
+function applyRsvpGeometry() {
+  const saved = loadRsvpGeometry();
+  if (!saved) return;
+  const g = clampRsvpToViewport(saved);
+  rsvpWindow.style.left = `${g.left}px`;
+  rsvpWindow.style.top = `${g.top}px`;
+  rsvpWindow.style.right = "auto";
+  rsvpWindow.style.width = `${g.width}px`;
+  rsvpWindow.style.height = `${g.height}px`;
+}
+function currentRsvpGeometry() {
+  const r = rsvpWindow.getBoundingClientRect();
+  return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+}
+
+// Drag by header.
+(function wireRsvpDrag() {
+  let dragging = false;
+  let offX = 0, offY = 0;
+  rsvpDragHandle.addEventListener("mousedown", (e) => {
+    if (e.target.closest("#rsvpClose")) return;
+    dragging = true;
+    rsvpDragHandle.classList.add("dragging");
+    const r = rsvpWindow.getBoundingClientRect();
+    offX = e.clientX - r.left;
+    offY = e.clientY - r.top;
+    rsvpWindow.style.left = `${r.left}px`;
+    rsvpWindow.style.top = `${r.top}px`;
+    rsvpWindow.style.right = "auto";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const g = clampRsvpToViewport({
+      left: e.clientX - offX,
+      top: e.clientY - offY,
+      width: rsvpWindow.offsetWidth,
+      height: rsvpWindow.offsetHeight,
+    });
+    rsvpWindow.style.left = `${g.left}px`;
+    rsvpWindow.style.top = `${g.top}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    rsvpDragHandle.classList.remove("dragging");
+    saveRsvpGeometry(currentRsvpGeometry());
+  });
+})();
+
+// Resize via bottom-right grip.
+(function wireRsvpResize() {
+  let resizing = false;
+  let startX = 0, startY = 0, startW = 0, startH = 0;
+  rsvpResizeGrip.addEventListener("mousedown", (e) => {
+    resizing = true;
+    const r = rsvpWindow.getBoundingClientRect();
+    startX = e.clientX; startY = e.clientY;
+    startW = r.width; startH = r.height;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!resizing) return;
+    const g = clampRsvpToViewport({
+      left: rsvpWindow.getBoundingClientRect().left,
+      top: rsvpWindow.getBoundingClientRect().top,
+      width: startW + (e.clientX - startX),
+      height: startH + (e.clientY - startY),
+    });
+    rsvpWindow.style.width = `${g.width}px`;
+    rsvpWindow.style.height = `${g.height}px`;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false;
+    saveRsvpGeometry(currentRsvpGeometry());
+  });
+})();
+
+new ResizeObserver(() => {
+  if (rsvpWindow.hidden) return;
+  saveRsvpGeometry(currentRsvpGeometry());
+}).observe(rsvpWindow);
+
+window.addEventListener("resize", () => {
+  if (rsvpWindow.hidden) return;
+  applyRsvpGeometry();
 });
 
 // ---------- Startup ----------

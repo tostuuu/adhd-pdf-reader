@@ -29,6 +29,7 @@
       <button id="zoomFit" title="Fit width (F)">Fit</button>
       <button id="zoomIn" title="Zoom in (])">+</button>
       <span class="sep"></span>
+      <button id="rsvpBtn" title="Speed-read view (V)">📖 RSVP</button>
       <button id="notesBtn" title="Notes (N)">📝 Notes</button>
       <button id="settingsBtn" title="Settings">⚙</button>
       <span id="buildStamp" class="muted small" title="Build timestamp — confirms you're running the latest version">__BUILD__</span>
@@ -87,6 +88,40 @@
     <div id="viewer"></div>
     <div id="drop-hint">Drop a PDF here, or click <b>Open PDF</b></div>
   </main>
+
+  <!-- RSVP: rapid serial visual presentation. Floating, movable, resizable.
+       Mirrors the same word index as the PDF highlight — both views update
+       together. Drag to a second monitor if your Chrome window spans both. -->
+  <div id="rsvpWindow" class="rsvp-window" role="dialog" aria-labelledby="rsvpTitle" hidden>
+    <header id="rsvpDragHandle">
+      <h2 id="rsvpTitle">📖 RSVP</h2>
+      <span id="rsvpProgress" class="muted small">—</span>
+      <button id="rsvpClose" title="Close (Esc or V)">✕</button>
+    </header>
+    <div id="rsvpStage">
+      <div class="rsvp-crosshair top"></div>
+      <div id="rsvpWord" class="rsvp-word">
+        <span id="rsvpPre" class="rsvp-pre"></span><span id="rsvpOrp" class="rsvp-orp"></span><span id="rsvpPost" class="rsvp-post"></span>
+      </div>
+      <div class="rsvp-crosshair bottom"></div>
+    </div>
+    <div id="rsvpControls" class="rsvp-controls">
+      <button id="rsvpPrev" title="Previous word">←</button>
+      <button id="rsvpPlay" title="Play / Pause">▶</button>
+      <button id="rsvpNext" title="Next word">→</button>
+      <div class="rsvp-ctrl">
+        <label for="rsvpWpm">Speed</label>
+        <input type="range" id="rsvpWpm" min="80" max="900" step="10" />
+        <span id="rsvpWpmVal" class="muted small">— wpm</span>
+      </div>
+      <div class="rsvp-ctrl">
+        <label>Word size</label>
+        <button id="rsvpFontSmaller" title="Smaller">A−</button>
+        <button id="rsvpFontBigger" title="Bigger">A+</button>
+      </div>
+    </div>
+    <div id="rsvpResizeGrip" title="Drag to resize"></div>
+  </div>
 
   <!-- Notes: a floating, draggable, resizable window. Doesn't block the PDF.
        Rich text via Quill 2.x. Saved as <hash>.html on disk. -->
@@ -165,7 +200,7 @@
     </div>
     <div id="bookmarkInfo" class="muted small" hidden></div>
     <div id="shortcutsHint" class="muted small">
-      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart · B pin · G go · N notes · click to jump · drag to select
+      Space play · ← → page · [ ] zoom · F fit · + − speed · , . band · R restart · B pin · G go · N notes · V rsvp · click to jump · drag to select
     </div>
   </aside>
 
