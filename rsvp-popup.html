@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Focus PDF — RSVP</title>
+  <link rel="stylesheet" href="styles.css?v=__BUILD__" />
+  <style>
+    /* Popup-specific overrides: take the whole browser window, no floating chrome. */
+    html, body { margin: 0; padding: 0; height: 100%; background: #14161c; overflow: hidden; }
+    .rsvp-window.standalone {
+      position: static;
+      top: auto; left: auto; right: auto;
+      width: 100vw;
+      height: 100vh;
+      min-width: 0; min-height: 0;
+      max-width: none; max-height: none;
+      border: none; border-radius: 0;
+      box-shadow: none;
+    }
+    /* No drag in standalone — the OS window itself moves. */
+    #rsvpDragHandle { cursor: default; user-select: none; }
+    /* No custom resize grip — the OS window already handles resizing. */
+    #rsvpResizeGrip { display: none; }
+    /* Connection indicator dot. */
+    #rsvpStatus {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #6abe6a;
+      margin-left: 8px;
+      vertical-align: middle;
+      transition: background 0.2s;
+    }
+    #rsvpStatus.disconnected {
+      background: #ff5a4d;
+      animation: rsvp-pulse 1.5s infinite ease-in-out;
+    }
+    @keyframes rsvp-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+  </style>
+</head>
+<body>
+  <div id="rsvpWindow" class="rsvp-window standalone">
+    <header id="rsvpDragHandle">
+      <h2>📖 RSVP</h2>
+      <span id="rsvpProgress" class="muted small">connecting…</span>
+      <span id="rsvpStatus" title="Connection to main window"></span>
+    </header>
+    <div id="rsvpStage">
+      <div class="rsvp-crosshair top"></div>
+      <div id="rsvpWord" class="rsvp-word">
+        <span id="rsvpPre" class="rsvp-pre"></span><span id="rsvpOrp" class="rsvp-orp">—</span><span id="rsvpPost" class="rsvp-post"></span>
+      </div>
+      <div class="rsvp-crosshair bottom"></div>
+    </div>
+    <div id="rsvpControls" class="rsvp-controls">
+      <button id="rsvpPrev" title="Previous word (←)">←</button>
+      <button id="rsvpPlay" title="Play / Pause (Space)">▶</button>
+      <button id="rsvpNext" title="Next word (→)">→</button>
+      <div class="rsvp-ctrl">
+        <label for="rsvpWpm">Speed</label>
+        <input type="range" id="rsvpWpm" min="80" max="900" step="10" value="250" />
+        <span id="rsvpWpmVal" class="muted small">250 wpm</span>
+      </div>
+      <div class="rsvp-ctrl">
+        <label>Size</label>
+        <button id="rsvpFontSmaller" title="Smaller">A−</button>
+        <button id="rsvpFontBigger" title="Bigger">A+</button>
+      </div>
+    </div>
+  </div>
+  <script src="rsvp-popup.js?v=__BUILD__"></script>
+</body>
+</html>

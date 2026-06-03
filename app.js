@@ -242,6 +242,9 @@ async function loadFromFile(file, opts = {}) {
     missing: false,
   });
   await loadPdfFromBuffer(buf);
+  // Let any standalone Notes popup window know we're on a new PDF so it
+  // can switch contexts and load that PDF's notes.
+  if (typeof broadcastNotesContext === "function") broadcastNotesContext();
 }
 
 async function loadPdfFromBuffer(buf) {
@@ -466,6 +469,11 @@ async function renderPage(idx) {
     // expectations far better than hand-rolled spans (continuous blue
     // highlight, correct direction when dragging up/down, etc.).
     await buildSelectionLayer(p, vp);
+    // The TextLayer now exists with real, browser-measured glyph rects. Snap
+    // every word on this page to those rects so the highlight band aligns to
+    // actual letters instead of the proportional-width approximation we built
+    // from the raw text-content items.
+    refineGeometryFromTextLayer(p);
     p.rendered = true;
     // A newly-rendered page can shift neighbouring pages by fractions of a px;
     // resync overlays so nothing drifts off the current line.
@@ -505,6 +513,131 @@ async function buildSelectionLayer(p, viewport) {
   } catch (e) {
     console.warn("[focuspdf] text layer render failed:", e);
     container.remove();
+  }
+}
+
+// Re-measure every word on page `p` directly from the PDF.js TextLayer DOM
+// using a Range over each whitespace-delimited substring. The browser's
+// Range geometry is the same one selection uses, so the resulting rects
+// match real glyph positions exactly — no more half-highlighted letters or
+// bands that extend into empty space when the source PDF uses a
+// proportional font.
+//
+// We rebuild positions in-place to preserve `state.allWords` indexes, which
+// other things (bookmarks, currentWordIdx, RSVP) depend on. If the DOM word
+// count differs from what extractAllText produced (rare — happens on PDFs
+// with unusual ligatures), we leave the approximate geometry alone for that
+// page rather than silently misaligning indexes.
+function refineGeometryFromTextLayer(p) {
+  const container = p.pageDiv.querySelector(".textLayer");
+  if (!container) return;
+  const spans = container.querySelectorAll("span");
+  if (!spans.length) return;
+
+  const pRect = p.pageDiv.getBoundingClientRect();
+  const measured = [];
+  const re = /\S+/g;
+  for (const span of spans) {
+    // PDF.js wraps each item's text in a leaf span with a single text node.
+    // Skip the marked-content wrappers and br placeholders which have no text.
+    const node = span.firstChild;
+    if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+    const text = node.nodeValue;
+    if (!text || !text.trim()) continue;
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const range = document.createRange();
+      range.setStart(node, m.index);
+      range.setEnd(node, m.index + m[0].length);
+      const rects = range.getClientRects();
+      range.detach?.();
+      if (!rects.length) continue;
+      // Union all rects in case the word visually wraps (TextLayer normally
+      // doesn't wrap, but defensive against rotated text and ligature glyphs).
+      let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+      for (const rc of rects) {
+        if (rc.width <= 0 || rc.height <= 0) continue;
+        if (rc.left < l) l = rc.left;
+        if (rc.top < t) t = rc.top;
+        if (rc.right > r) r = rc.right;
+        if (rc.bottom > b) b = rc.bottom;
+      }
+      if (!isFinite(l)) continue;
+      measured.push({
+        str: m[0],
+        left: l - pRect.left,
+        top: t - pRect.top,
+        width: r - l,
+        height: b - t,
+      });
+    }
+  }
+
+  // Slice out this page's words from the global list.
+  let firstIdx = -1, lastIdx = -1;
+  for (let i = 0; i < state.allWords.length; i++) {
+    if (state.allWords[i].pageIndex === p.pageIndex) {
+      if (firstIdx === -1) firstIdx = i;
+      lastIdx = i;
+    } else if (firstIdx !== -1) {
+      break;
+    }
+  }
+  if (firstIdx === -1) return;
+  const pageWordCount = lastIdx - firstIdx + 1;
+
+  if (measured.length !== pageWordCount) {
+    // Counts disagree → can't trust 1:1 mapping. Leave approximate geometry
+    // alone; the band will still land on the right word, just less precisely.
+    return;
+  }
+
+  // Verify the lists are in the same order. extractAllText sorts items by
+  // (top, left) which produces visual top-down/left-right; the TextLayer
+  // walks PDF source order, which usually matches but can diverge on
+  // multi-column layouts or PDFs with out-of-order text. If they diverge
+  // we'd be assigning the wrong DOM rect to the wrong word — bail instead.
+  let mismatches = 0;
+  const norm = (s) => s.replace(/[\s\u00A0]+/g, "");
+  for (let i = 0; i < pageWordCount; i++) {
+    if (norm(state.allWords[firstIdx + i].str) !== norm(measured[i].str)) {
+      mismatches++;
+      if (mismatches > 2) return;  // not the same reading order — abort.
+    }
+  }
+
+  for (let i = 0; i < pageWordCount; i++) {
+    const w = state.allWords[firstIdx + i];
+    const m = measured[i];
+    w.left = m.left;
+    w.top = m.top;
+    w.width = m.width;
+    w.height = m.height;
+  }
+
+  // Rebuild line bounding boxes from the now-accurate word rects so the
+  // padding logic in updateHighlight (which uses line gaps) stays correct.
+  const linesOnPage = new Set();
+  for (let i = firstIdx; i <= lastIdx; i++) linesOnPage.add(state.allWords[i].lineIdx);
+  for (const lineIdx of linesOnPage) {
+    const line = state.allLines[lineIdx];
+    if (!line) continue;
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (let i = line.firstWordIdx; i <= line.lastWordIdx; i++) {
+      const w = state.allWords[i];
+      if (!w) continue;
+      if (w.left < l) l = w.left;
+      if (w.top < t) t = w.top;
+      if (w.left + w.width > r) r = w.left + w.width;
+      if (w.top + w.height > b) b = w.top + w.height;
+    }
+    if (isFinite(l)) {
+      line.left = l;
+      line.top = t;
+      line.width = r - l;
+      line.height = b - t;
+    }
   }
 }
 
@@ -673,6 +806,8 @@ function updateHighlight() {
   // the reading position changes, regardless of what triggered the change
   // (play tick, click-to-jump, keyboard nav, pin restore, etc.).
   if (typeof rsvpRender === "function") rsvpRender();
+  // Also broadcast to any standalone popup windows on the second monitor.
+  if (typeof broadcastRsvpState === "function") broadcastRsvpState();
 
   const h = state.highlightEl;
   if (!h) return;
@@ -750,12 +885,14 @@ function startPlaying() {
   state.playing = true;
   playBtn.textContent = "⏸ Pause";
   if (typeof rsvpReflectPlayState === "function") rsvpReflectPlayState();
+  if (typeof broadcastRsvpState === "function") broadcastRsvpState();
   scheduleNext();
 }
 function stopPlaying() {
   state.playing = false;
   playBtn.textContent = "▶ Play";
   if (typeof rsvpReflectPlayState === "function") rsvpReflectPlayState();
+  if (typeof broadcastRsvpState === "function") broadcastRsvpState();
   if (state.advanceTimer) {
     clearTimeout(state.advanceTimer);
     state.advanceTimer = null;
@@ -765,25 +902,78 @@ function togglePlay() {
   state.playing ? stopPlaying() : startPlaying();
 }
 
-// Duration for displaying a single "word chunk" — modulated by word length
-// and trailing punctuation, per the Animated Dynamic Highlighting research.
-// Base is the time per average-length word at the user's WPM; longer words
-// get more time, and sentence/clause boundaries get natural pauses.
+// Function words that the reading literature (Rayner et al.) shows the brain
+// fixates on for noticeably less time than content words. Kept short to keep
+// the lookup cheap on the hot path.
+const FUNCTION_WORDS = new Set([
+  "a","an","the","and","or","but","nor","if","of","to","in","on","at","by",
+  "for","is","am","are","was","were","be","been","being","do","does","did",
+  "done","have","has","had","not","no","so","as","it","its","this","that",
+  "these","those","i","me","my","mine","we","us","our","ours","you","your",
+  "yours","he","him","his","she","her","hers","they","them","their","theirs",
+  "with","from","up","out","over","into","than","then","when","while","also",
+  "just","only","very","such","like","into","onto","off","via",
+]);
+
+// Duration for displaying a single word — additive model rather than
+// multiplicative, so the WPM slider stays the true target speed. Word length,
+// punctuation pauses, and return-sweep eye movements (Rayner ~150-200ms for
+// line breaks, ~300ms for paragraph breaks) are all added on top of the base.
+//
+// NOTE on multi-word bands: the band slides ONE word per tick regardless of
+// `bandSize`, so each tick is still "one new word read" — we deliberately do
+// NOT divide by bandSize here (that's what made wider bands feel jarringly
+// fast in earlier builds).
 function wordDurationMs(idx) {
   const base = 60000 / Math.max(1, state.wpm);
   const w = state.allWords[idx];
   if (!w) return base;
-  // Length factor: characters / 5 (≈ avg English word), clamped to avoid extremes.
-  const lenFactor = Math.max(0.55, Math.min(1.9, w.str.length / 5));
-  // Punctuation at the end of a word → brief phrase/sentence pause.
+
+  const stripped = w.str.replace(/[^A-Za-z0-9]/g, "");
+  const len = Math.max(1, stripped.length);
+  const lower = stripped.toLowerCase();
+
+  // Length factor: chars / 5 (avg English word). Steeper bounds than before
+  // so 12-letter words really do get noticeably more time than 4-letter ones.
+  let lenFactor = Math.max(0.55, Math.min(2.3, len / 5));
+
+  // Function words (a, the, of, with, ...) are read pre-attentively — they
+  // shouldn't eat a full "word slot" of WPM time.
+  if (len <= 4 && FUNCTION_WORDS.has(lower)) lenFactor *= 0.7;
+
+  // Numbers and all-caps abbreviations (URLs, "NASA", "PDF") are visually
+  // denser and slower to parse, even when short.
+  if (/\d/.test(w.str)) lenFactor *= 1.25;
+  if (/^[A-Z]{2,}$/.test(stripped)) lenFactor *= 1.15;
+
+  let ms = base * lenFactor;
+
+  // Additive punctuation pauses — match a comfortable read-aloud cadence.
+  // (Multiplying these like before made sentence-final long words crawl.)
   const last = w.str.slice(-1);
-  let punctFactor = 1;
-  if (".!?".includes(last)) punctFactor = 1.7;        // sentence end
-  else if (",;:".includes(last)) punctFactor = 1.25;  // clause break
-  else if (")]}\"'”’".includes(last)) punctFactor = 1.1;
-  // Divide by bandSize so WPM stays a meaningful words-per-minute target even
-  // when several words are shown at once.
-  return (base * lenFactor * punctFactor) / Math.max(1, state.bandSize);
+  if (".!?".includes(last)) ms += 280;
+  else if (";:".includes(last)) ms += 160;
+  else if (last === ",") ms += 110;
+  else if (")]}\"'”’".includes(last)) ms += 50;
+
+  // Return-sweep pause: when the NEXT word is on a different line, give the
+  // eye time to track to it. Rayner pegs the return sweep at ~150-200ms;
+  // we use 200ms for a normal wrap and 320ms when there's a visible gap
+  // (paragraph break or page change).
+  const next = state.allWords[idx + 1];
+  if (next && next.lineIdx !== w.lineIdx) {
+    const thisLine = state.allLines[w.lineIdx];
+    const nextLine = state.allLines[next.lineIdx];
+    const paragraphBreak =
+      next.pageIndex !== w.pageIndex ||
+      (thisLine && nextLine &&
+        nextLine.top - (thisLine.top + thisLine.height) > thisLine.height * 0.8);
+    ms += paragraphBreak ? 320 : 200;
+  }
+
+  // Floor: below ~70ms a fixation can't form. Above this, even at the slider
+  // max (900wpm), the slowest words still hit ~150ms which stays readable.
+  return Math.max(70, ms);
 }
 
 // Brief opacity "tick" when the band moves — mimics a saccade landing,
@@ -929,6 +1119,7 @@ wpmSlider.addEventListener("input", () => {
   state.wpm = Number(wpmSlider.value);
   updateWpmDisplay();
   if (typeof rsvpReflectWpm === "function") rsvpReflectWpm();
+  if (typeof broadcastRsvpState === "function") broadcastRsvpState();
   saveCurrentBookmark();
 });
 bandSlider.addEventListener("input", () => {
@@ -1587,7 +1778,23 @@ async function flushNoteNow() {
   if (!notesLoadedHash || !quill) return;
   if (notesSaveTimer) { clearTimeout(notesSaveTimer); notesSaveTimer = null; }
   const html = quill.root.innerHTML;
-  await saveNoteHtml(notesLoadedHash, html);
+  const ok = await saveNoteHtml(notesLoadedHash, html);
+  if (ok) broadcastNoteSaved(notesLoadedHash);
+}
+
+// Pull the current note from disk into the editor — used when the popup
+// signals that it saved an edit. Bails if the user is actively editing
+// here so we don't clobber in-flight changes.
+async function reloadNotesFromServer() {
+  if (!quill || !notesLoadedHash) return;
+  if (notesWindow.hidden) return;
+  if (notesSaveTimer) return;
+  if (quill.hasFocus && quill.hasFocus()) return;
+  const html = await loadNoteHtml(notesLoadedHash);
+  // setContents([]) + dangerouslyPasteHTML keeps Quill's model consistent.
+  quill.setContents([], "silent");
+  if (html) quill.clipboard.dangerouslyPasteHTML(0, html, "silent");
+  notesStatusEl.textContent = "Synced from popup";
 }
 
 async function closeNotes() {
@@ -1620,6 +1827,7 @@ if (quill) {
       const html = quill.root.innerHTML;
       const ok = await saveNoteHtml(notesLoadedHash, html);
       notesStatusEl.textContent = ok ? "Saved" : "Save failed";
+      if (ok) broadcastNoteSaved(notesLoadedHash);
     }, 400);
   });
 
@@ -1766,6 +1974,63 @@ window.addEventListener("resize", () => {
   if (notesWindow.hidden) return;
   applyNotesGeometry();
 });
+
+// --- Notes popup window (second monitor) ---
+// Same idea as the RSVP popup: open notes-popup.html as a standalone OS-level
+// window, sync over a BroadcastChannel. The popup talks to the server itself
+// for load/save; we only need to tell it WHICH PDF (the hash) we're on, and
+// notify each other when either side has saved so we can refresh.
+const NOTES_CHANNEL = "focuspdf-notes";
+const notesChannel = (typeof BroadcastChannel !== "undefined")
+  ? new BroadcastChannel(NOTES_CHANNEL)
+  : null;
+
+function broadcastNotesContext() {
+  if (!notesChannel) return;
+  notesChannel.postMessage({
+    type: "context",
+    hash: state.fileHash || null,
+    pdfName: state.fileName || null,
+  });
+}
+
+function broadcastNoteSaved(hash) {
+  if (!notesChannel || !hash) return;
+  notesChannel.postMessage({ type: "noteSaved", hash });
+}
+
+if (notesChannel) {
+  notesChannel.addEventListener("message", (e) => {
+    const m = e.data || {};
+    if (m.type === "hello") { broadcastNotesContext(); return; }
+    if (m.type === "noteSaved" && m.hash === state.fileHash) {
+      // Popup saved a change for the PDF we're showing — refresh.
+      reloadNotesFromServer();
+      return;
+    }
+  });
+}
+
+const notesPopoutBtn = $("notesPopout");
+if (notesPopoutBtn) {
+  notesPopoutBtn.addEventListener("click", () => {
+    const w = 560, h = 640;
+    const win = window.open(
+      "/notes-popup.html",
+      "focuspdf-notes-popup",
+      `popup=true,width=${w},height=${h},menubar=no,toolbar=no,location=no,status=no`
+    );
+    if (!win) {
+      alert(
+        "Popup window blocked.\n\n" +
+        "Click the popup-blocked icon in your address bar and choose " +
+        "\"Always allow popups from localhost:8765\", then click ⧉ again."
+      );
+      return;
+    }
+    try { win.focus(); } catch {}
+  });
+}
 
 // ---------- RSVP (Rapid Serial Visual Presentation) ----------
 // Floating, movable, resizable window. Shows the current word one at a time
@@ -2014,6 +2279,83 @@ window.addEventListener("resize", () => {
   if (rsvpWindow.hidden) return;
   applyRsvpGeometry();
 });
+
+// --- RSVP popup window (second monitor) ---
+// We broadcast every state change to any same-origin window listening on the
+// "focuspdf-rsvp" channel. The popup at /rsvp-popup.html is a thin client that
+// renders the current word and posts back command messages (play, step, wpm).
+const RSVP_CHANNEL = "focuspdf-rsvp";
+const rsvpChannel = (typeof BroadcastChannel !== "undefined")
+  ? new BroadcastChannel(RSVP_CHANNEL)
+  : null;
+
+function broadcastRsvpState() {
+  if (!rsvpChannel) return;
+  const w = state.allWords[state.currentWordIdx];
+  rsvpChannel.postMessage({
+    type: "state",
+    word: w?.str || null,
+    page: w ? w.pageIndex + 1 : 0,
+    wordIdx: state.currentWordIdx,
+    total: state.allWords.length,
+    wpm: state.wpm,
+    playing: !!state.playing,
+  });
+}
+
+if (rsvpChannel) {
+  rsvpChannel.addEventListener("message", (e) => {
+    const m = e.data || {};
+    if (m.type === "hello") { broadcastRsvpState(); return; }
+    if (m.type === "togglePlay") { togglePlay(); return; }
+    if (m.type === "step" && Number.isFinite(m.delta)) {
+      if (!state.allWords.length) return;
+      state.currentWordIdx = clampWord(state.currentWordIdx + m.delta);
+      updateHighlight();
+      scrollToCurrent();
+      saveCurrentBookmark();
+      return;
+    }
+    if (m.type === "setWpm" && Number.isFinite(m.value)) {
+      state.wpm = m.value;
+      wpmSlider.value = m.value;
+      updateWpmDisplay();
+      if (typeof rsvpReflectWpm === "function") rsvpReflectWpm();
+      broadcastRsvpState();
+      return;
+    }
+  });
+}
+
+// Pop-out button: open the standalone RSVP window. Useful for dual-monitor
+// setups so the main Chrome window can stay on one screen and RSVP on the other.
+const rsvpPopoutBtn = $("rsvpPopout");
+if (rsvpPopoutBtn) {
+  rsvpPopoutBtn.addEventListener("click", () => {
+    const w = 640, h = 420;
+    // `popup=true` is the modern Chromium hint that forces a real OS-level
+    // window rather than a tab inside the existing browser window. Without
+    // it, modern Chrome routes the call to a new tab by default.
+    // Naming the window "focuspdf-rsvp-popup" means clicking the button a
+    // second time focuses the existing popup instead of spawning another.
+    const win = window.open(
+      "/rsvp-popup.html",
+      "focuspdf-rsvp-popup",
+      `popup=true,width=${w},height=${h},menubar=no,toolbar=no,location=no,status=no`
+    );
+    if (!win) {
+      alert(
+        "Popup window blocked.\n\n" +
+        "Click the popup-blocked icon in your address bar (usually a tiny \"x\" " +
+        "with a red dot) and choose \"Always allow popups from localhost:8765\". " +
+        "Then click the ⧉ button again."
+      );
+      return;
+    }
+    // Bring it to the front in case the OS placed it under the main window.
+    try { win.focus(); } catch {}
+  });
+}
 
 // ---------- Startup ----------
 (async function init() {

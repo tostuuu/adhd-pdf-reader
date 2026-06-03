@@ -24,6 +24,8 @@ mkdir -p "${APP_DIR}/Contents/Resources/www"
 # service worker added caching complexity with zero benefit and was a frequent
 # source of "stale code" bugs. The page actively unregisters any legacy SWs.
 cp index.html styles.css app.js manifest.webmanifest icon.svg \
+   rsvp-popup.html rsvp-popup.js \
+   notes-popup.html notes-popup.js \
    "${APP_DIR}/Contents/Resources/www/"
 # Bundled PDF.js — lets the app work offline. Fatal error if missing.
 if [ ! -f "vendor/pdfjs/pdf.min.mjs" ] || [ ! -f "vendor/pdfjs/pdf.worker.min.mjs" ]; then
@@ -53,6 +55,10 @@ cp server.py "${APP_DIR}/Contents/Resources/server.py"
 # We replace the sentinel "__BUILD__" string at build time.
 sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/index.html"
 sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/app.js"
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/rsvp-popup.html"
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/rsvp-popup.js"
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/notes-popup.html"
+sed -i '' "s/__BUILD__/${BUILD_VERSION}/g" "${APP_DIR}/Contents/Resources/www/notes-popup.js"
 
 # 2. Generate the ICNS icon from icon.svg.
 ICONSET_DIR="$(mktemp -d)/AppIcon.iconset"

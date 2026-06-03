@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Focus PDF — Notes</title>
+  <link rel="stylesheet" href="vendor/quill/quill.snow.css?v=__BUILD__" />
+  <link rel="stylesheet" href="styles.css?v=__BUILD__" />
+  <style>
+    /* Popup overrides — make the notes window fill the entire OS window. */
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--panel); color: var(--text);
+      overflow: hidden;
+    }
+    .notes-window.standalone {
+      position: static;
+      top: auto; left: auto; right: auto;
+      width: 100vw; height: 100vh;
+      min-width: 0; min-height: 0;
+      max-width: none; max-height: none;
+      border: none; border-radius: 0;
+      box-shadow: none;
+      display: flex; flex-direction: column;
+    }
+    .notes-window.standalone #notesDragHandle { cursor: default; user-select: none; }
+    .notes-window.standalone #notesResizeGrip { display: none; }
+    .notes-window.standalone #notesEditor { flex: 1; min-height: 0; }
+    /* Connection-health dot, same idea as the RSVP popup. */
+    #notesStatusDot {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #6abe6a;
+      margin-left: 8px;
+      vertical-align: middle;
+      transition: background 0.2s;
+    }
+    #notesStatusDot.disconnected {
+      background: #ff5a4d;
+      animation: notes-pulse 1.5s infinite ease-in-out;
+    }
+    @keyframes notes-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+  </style>
+</head>
+<body>
+  <div id="notesWindow" class="notes-window standalone" role="dialog" aria-labelledby="notesTitle">
+    <header id="notesDragHandle">
+      <h2 id="notesTitle">📝 Notes</h2>
+      <span id="notesStatus" class="muted small">connecting…</span>
+      <span id="notesStatusDot" title="Connection to main window"></span>
+    </header>
+    <div id="notesToolbar">
+      <span class="ql-formats">
+        <select class="ql-header">
+          <option value="1">H1</option>
+          <option value="2">H2</option>
+          <option value="3">H3</option>
+          <option selected>Body</option>
+        </select>
+        <select class="ql-size">
+          <option value="small"></option>
+          <option selected></option>
+          <option value="large"></option>
+          <option value="huge"></option>
+        </select>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-bold" title="Bold (Cmd/Ctrl-B)"></button>
+        <button class="ql-italic" title="Italic (Cmd/Ctrl-I)"></button>
+        <button class="ql-underline" title="Underline"></button>
+        <button class="ql-strike" title="Strikethrough"></button>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-list" value="ordered" title="Numbered list"></button>
+        <button class="ql-list" value="bullet" title="Bullet list"></button>
+        <button class="ql-blockquote" title="Quote"></button>
+        <button class="ql-code-block" title="Code block"></button>
+      </span>
+      <span class="ql-formats">
+        <select class="ql-color" title="Text color"></select>
+        <select class="ql-background" title="Highlight"></select>
+      </span>
+      <span class="ql-formats">
+        <button class="ql-time" title="Insert timestamp"><span class="qbtn">🕒</span></button>
+        <button class="ql-insertTable" title="Insert table"><span class="qbtn">⊞</span></button>
+        <button class="ql-clean" title="Clear formatting"></button>
+      </span>
+      <span class="ql-formats notes-table-tools">
+        <button class="ql-tableAddRow" title="Add row below"><span class="qbtn">＋R</span></button>
+        <button class="ql-tableAddCol" title="Add column right"><span class="qbtn">＋C</span></button>
+        <button class="ql-tableDelRow" title="Delete current row"><span class="qbtn">−R</span></button>
+        <button class="ql-tableDelCol" title="Delete current column"><span class="qbtn">−C</span></button>
+        <button class="ql-tableDelete" title="Delete entire table"><span class="qbtn">✕▦</span></button>
+      </span>
+    </div>
+    <div id="notesEditor"></div>
+  </div>
+  <script src="vendor/quill/quill.js?v=__BUILD__"></script>
+  <script src="notes-popup.js?v=__BUILD__"></script>
+</body>
+</html>

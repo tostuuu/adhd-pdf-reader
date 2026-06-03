@@ -369,11 +369,13 @@ body.has-doc #drop-hint { display: none; }
 #rsvpDragHandle.dragging { cursor: grabbing; }
 #rsvpDragHandle h2 { margin: 0; font-size: 14px; font-weight: 600; }
 #rsvpDragHandle #rsvpProgress { margin-left: auto; font-family: ui-monospace, Menlo, monospace; }
-#rsvpDragHandle #rsvpClose {
+#rsvpDragHandle #rsvpClose,
+#rsvpDragHandle #rsvpPopout {
   background: transparent; color: var(--muted);
   padding: 2px 8px; font-size: 14px;
 }
-#rsvpDragHandle #rsvpClose:hover { color: var(--text); background: var(--btn); }
+#rsvpDragHandle #rsvpClose:hover,
+#rsvpDragHandle #rsvpPopout:hover { color: var(--text); background: var(--btn); }
 
 /* Stage: where the word + crosshairs sit, vertically centered. */
 #rsvpStage {
@@ -547,11 +549,13 @@ body.has-doc #drop-hint { display: none; }
 #notesDragHandle.dragging { cursor: grabbing; }
 #notesDragHandle h2 { margin: 0; font-size: 14px; font-weight: 600; }
 #notesDragHandle #notesStatus { margin-left: auto; }
-#notesDragHandle #notesClose {
+#notesDragHandle #notesClose,
+#notesDragHandle #notesPopout {
   background: transparent; color: var(--muted);
   padding: 2px 8px; font-size: 14px;
 }
-#notesDragHandle #notesClose:hover { color: var(--text); background: var(--btn); }
+#notesDragHandle #notesClose:hover,
+#notesDragHandle #notesPopout:hover { color: var(--text); background: var(--btn); }
 
 /* Quill toolbar: dark, compact, matches the rest of the panel. */
 #notesToolbar.ql-toolbar.ql-snow {
